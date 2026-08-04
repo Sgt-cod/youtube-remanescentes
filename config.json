@@ -1,0 +1,18 @@
+{
+  "tipo": "noticias",
+  "canal": {
+    "nome": "Política em Foco",
+    "descricao": "Notícias políticas do Brasil"
+  },
+  
+  "duracao_minutos": 10,
+  "voz": "pt-BR-ThalitaMultilingualNeural",
+  
+  "rss_feeds": [
+    "https://g1.globo.com/rss/g1/politica/",
+    "https://www.estadao.com.br/politica/rss.xml",
+    "https://feeds.folha.uol.com.br/poder/rss091.xml"
+  ],
+  
+  "temas": []
+}
