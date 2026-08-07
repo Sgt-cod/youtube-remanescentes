@@ -53,7 +53,8 @@ USAR_CURACAO = os.environ.get('USAR_CURACAO', 'false').lower() == 'true' and CUR
 CURACAO_TIMEOUT = int(os.environ.get('CURACAO_TIMEOUT', '3600'))
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash-lite')
+GEMINI_TEXT_MODEL = os.environ.get('GEMINI_TEXT_MODEL', 'gemini-3.5-flash-lite')
+model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
 imagem_model = genai.GenerativeModel(IMAGEM_MODEL_NAME)
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
