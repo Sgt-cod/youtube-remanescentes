@@ -1,18 +1,56 @@
 {
-  "tipo": "noticias",
-  "canal": {
-    "nome": "Política em Foco",
-    "descricao": "Notícias políticas do Brasil"
-  },
-  
-  "duracao_minutos": 10,
-  "voz": "pt-BR-ThalitaMultilingualNeural",
-  
-  "rss_feeds": [
-    "https://g1.globo.com/rss/g1/politica/",
-    "https://www.estadao.com.br/politica/rss.xml",
-    "https://feeds.folha.uol.com.br/poder/rss091.xml"
+  "canal": "Historias Biblicas para Criancas",
+  "voz_fallback": "pt-BR-ThalitaMultilingualNeural",
+  "tags_padrao": [
+    "historias biblicas",
+    "biblia infantil",
+    "desenho biblico",
+    "biblia para criancas",
+    "historias para dormir",
+    "animacao biblica"
   ],
-  
-  "temas": []
+  "historias": [
+    "A criação do mundo",
+    "Adão e Eva no Jardim do Éden",
+    "A arca de Noé",
+    "A Torre de Babel",
+    "Abraão e a promessa de um filho",
+    "Jacó e Esaú",
+    "José e o casaco colorido",
+    "José no Egito e o perdão aos irmãos",
+    "Moisés no cesto do rio",
+    "Moisés e a sarça ardente",
+    "As dez pragas do Egito",
+    "A travessia do Mar Vermelho",
+    "Os dez mandamentos",
+    "Josué e os muros de Jericó",
+    "Sansão e sua força",
+    "Rute, a mulher fiel",
+    "Davi e o gigante Golias",
+    "Davi e o rei Saul",
+    "Salomão e a sabedoria",
+    "Elias e os corvos",
+    "Elias no Monte Carmelo",
+    "Daniel na cova dos leões",
+    "Os três amigos na fornalha",
+    "Jonas e a grande baleia",
+    "O nascimento de Jesus",
+    "Os pastores e a estrela de Belém",
+    "Jesus no templo ainda criança",
+    "O batismo de Jesus",
+    "Jesus chama os discípulos",
+    "A multiplicação dos pães e peixes",
+    "Jesus caminha sobre as águas",
+    "Jesus acalma a tempestade",
+    "A parábola do bom samaritano",
+    "A parábola do filho pródigo",
+    "A parábola da ovelha perdida",
+    "Jesus e as crianças",
+    "Zaqueu, o homem baixinho",
+    "Lázaro é ressuscitado",
+    "A entrada triunfal em Jerusalém",
+    "A última ceia",
+    "A ressurreição de Jesus",
+    "A conversão de Paulo"
+  ]
 }
