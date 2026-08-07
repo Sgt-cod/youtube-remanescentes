@@ -287,7 +287,8 @@ def transcrever_com_timestamps(audio_path):
 # IMAGENS — geração via IA (hiper-realista), substitui a busca em assets/
 # ============================================================
 
-def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral):
+
+def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral, tentativas=3):
     """
     Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D,
     no nível de um diretor de arte de animação profissional.
@@ -308,17 +309,6 @@ Crie um prompt de geração de imagem em INGLÊS, extremamente detalhado, no ní
 
 Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
 
-    resposta = model.generate_content(prompt)
-    return resposta.text.strip()
-
-import time
-
-def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral, tentativas=3):
-    """
-    Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D...
-    """
-    prompt = f"""Você é um diretor de arte de animação... (mantenha seu texto original aqui)"""
-
     for tentativa in range(tentativas):
         try:
             resposta = model.generate_content(prompt)
@@ -333,6 +323,31 @@ def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral, tentativas=
             
     # Se falhar todas as vezes, retorna uma string vazia ou um prompt genérico
     return "3D Pixar-style animation, beautiful scene, family-friendly, 9:16 vertical composition"
+
+
+def gerar_imagem_ia(prompt_imagem, output_path, tentativas=3):
+    """Gera uma imagem hiper-realista via Gemini (Nano Banana) e salva em disco."""
+    for tentativa in range(tentativas):
+        try:
+            resposta = imagem_model.generate_content(prompt_imagem)
+            for parte in resposta.candidates[0].content.parts:
+                inline_data = getattr(parte, 'inline_data', None)
+                if inline_data is not None and inline_data.data:
+                    with open(output_path, 'wb') as f:
+                        f.write(inline_data.data)
+                    
+                    # Pausa no SUCESSO para não estourar limite do Google
+                    time.sleep(6) 
+                    return output_path
+                    
+            print(f"  ⚠️ Resposta sem dados de imagem (tentativa {tentativa + 1})")
+        except Exception as e:
+            print(f"  ⚠️ Erro ao gerar imagem (tentativa {tentativa + 1}): {e}")
+        
+        # Pausa no ERRO (seja timeout ou limite excedido)
+        time.sleep(10) 
+        
+    return None
 
 
 def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
