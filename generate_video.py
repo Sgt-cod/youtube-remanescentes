@@ -311,8 +311,7 @@ Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
     resposta = model.generate_content(prompt)
     return resposta.text.strip()
 
-
-def gerar_imagem_ia(prompt_imagem, output_path, tentativas=2):
+def gerar_imagem_ia(prompt_imagem, output_path, tentativas=3): # Sugiro aumentar para 3 tentativas
     """Gera uma imagem hiper-realista via Gemini (Nano Banana) e salva em disco."""
     for tentativa in range(tentativas):
         try:
@@ -322,11 +321,23 @@ def gerar_imagem_ia(prompt_imagem, output_path, tentativas=2):
                 if inline_data is not None and inline_data.data:
                     with open(output_path, 'wb') as f:
                         f.write(inline_data.data)
+                    
+                    # 1ª ALTERAÇÃO: DELAY DE SUCESSO
+                    # Adicione esta pausa de 6 segundos aqui. 
+                    # Isso garante que mesmo dando tudo certo, o código vai "respirar"
+                    # antes de pedir a próxima imagem da história, respeitando os 10 por minuto.
+                    time.sleep(6) 
+                    
                     return output_path
             print(f"  ⚠️ Resposta sem dados de imagem (tentativa {tentativa + 1})")
         except Exception as e:
             print(f"  ⚠️ Erro ao gerar imagem (tentativa {tentativa + 1}): {e}")
-        time.sleep(3)
+        
+        # 2ª ALTERAÇÃO: DELAY DE ERRO (Atualizar o seu)
+        # Se a API der o erro 429, 3 segundos é muito pouco tempo. 
+        # Mude para 10 segundos para dar tempo da cota do Google resetar.
+        time.sleep(10) 
+        
     return None
 
 
