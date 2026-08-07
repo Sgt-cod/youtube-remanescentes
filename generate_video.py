@@ -7,6 +7,7 @@ import time
 import sys
 from datetime import datetime
 import requests
+import urllib.parse
 import edge_tts
 import numpy as np
 from moviepy.editor import *
@@ -325,27 +326,41 @@ Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
     return "3D Pixar-style animation, beautiful scene, family-friendly, 9:16 vertical composition"
 
 
+import requests
+import urllib.parse
+import time
+
 def gerar_imagem_ia(prompt_imagem, output_path, tentativas=3):
-    """Gera uma imagem hiper-realista via Gemini (Nano Banana) e salva em disco."""
+    """Gera uma imagem via Pollinations.ai (100% Gratuito, sem API Key)"""
+    
+    # Adiciona detalhes extras para garantir a qualidade 3D Pixar
+    prompt_completo = prompt_imagem + ", 3d pixar style, high quality, masterpiece"
+    
+    # Codifica o texto para o formato de link de internet
+    prompt_formatado = urllib.parse.quote(prompt_completo)
+    
+    # Cria a URL com proporção 9:16 (vertical para Shorts) e sem marca d'água
+    url = f"https://image.pollinations.ai/prompt/{prompt_formatado}?width=768&height=1344&nologo=true"
+    
     for tentativa in range(tentativas):
         try:
-            resposta = imagem_model.generate_content(prompt_imagem)
-            for parte in resposta.candidates[0].content.parts:
-                inline_data = getattr(parte, 'inline_data', None)
-                if inline_data is not None and inline_data.data:
-                    with open(output_path, 'wb') as f:
-                        f.write(inline_data.data)
-                    
-                    # Pausa no SUCESSO para não estourar limite do Google
-                    time.sleep(6) 
-                    return output_path
-                    
-            print(f"  ⚠️ Resposta sem dados de imagem (tentativa {tentativa + 1})")
+            print(f"  🎨 Gerando imagem gratuitamente (tentativa {tentativa + 1})...")
+            # Faz o download direto da imagem
+            resposta = requests.get(url, timeout=60)
+            
+            if resposta.status_code == 200:
+                with open(output_path, 'wb') as f:
+                    f.write(resposta.content)
+                print("  ✅ Imagem gerada com sucesso!")
+                time.sleep(3) # Pausa leve só por garantia
+                return output_path
+            else:
+                print(f"  ⚠️ Erro do servidor: {resposta.status_code}")
+                
         except Exception as e:
-            print(f"  ⚠️ Erro ao gerar imagem (tentativa {tentativa + 1}): {e}")
-        
-        # Pausa no ERRO (seja timeout ou limite excedido)
-        time.sleep(10) 
+            print(f"  ⚠️ Erro ao baixar imagem: {e}")
+            
+        time.sleep(10) # Pausa antes de tentar de novo
         
     return None
 
