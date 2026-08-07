@@ -178,12 +178,12 @@ def criar_audio_fishaudio(texto, output_file):
 
     headers = {
         "Authorization": f"Bearer {FISHAUDIO_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "model": FISHAUDIO_MODEL  # ⚠️ vai no header, não no body — confirmado no exemplo oficial
     }
     payload = {
         "text": texto,
         "reference_id": FISHAUDIO_VOICE_ID,
-        "model": FISHAUDIO_MODEL,
         "format": "mp3"
     }
 
