@@ -47,6 +47,8 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_CANAL_ID: ${{ secrets.TELEGRAM_CANAL_ID }}
+          FISHAUDIO_API_KEY: ${{ secrets.FISHAUDIO_API_KEY }}
+          FISHAUDIO_VOICE_ID: ${{ secrets.FISHAUDIO_VOICE_ID }}
           BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
           BLOGGER_CREDENTIALS: ${{ secrets.BLOGGER_CREDENTIALS }}
           CANAL_YOUTUBE_URL: ${{ secrets.CANAL_YOUTUBE_URL }}
