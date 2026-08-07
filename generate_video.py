@@ -318,8 +318,8 @@ Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
             
         except Exception as e:
             print(f"  ⚠️ Erro ao gerar prompt (tentativa {tentativa + 1}): {e}")
-            # Se der erro 504 ou 429, espera 10 segundos antes de tentar de novo
-            time.sleep(10)
+            # Se der erro 504 ou 429, espera 45 segundos antes de tentar de novo
+            time.sleep(45)
             
     # Se falhar todas as vezes, retorna uma string vazia ou um prompt genérico
     return "3D Pixar-style animation, beautiful scene, family-friendly, 9:16 vertical composition"
