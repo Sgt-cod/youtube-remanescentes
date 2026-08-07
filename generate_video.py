@@ -313,33 +313,26 @@ Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
 
 import time
 
-def gerar_imagem_ia(prompt_imagem, output_path, tentativas=3):
-    """Gera uma imagem hiper-realista via Gemini (Nano Banana) e salva em disco."""
+def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral, tentativas=3):
+    """
+    Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D...
+    """
+    prompt = f"""Você é um diretor de arte de animação... (mantenha seu texto original aqui)"""
+
     for tentativa in range(tentativas):
         try:
-            # 1. ADICIONE O PARÂMETRO REQUEST_OPTIONS AQUI
-            # 600 segundos = 10 minutos de paciência antes de dar erro 504
-            resposta = imagem_model.generate_content(
-                prompt_imagem,
-                request_options={"timeout": 600} 
-            )
+            resposta = model.generate_content(prompt)
+            # Dá um tempinho de respiro para não estourar a cota de RPM
+            time.sleep(3) 
+            return resposta.text.strip()
             
-            for parte in resposta.candidates[0].content.parts:
-                inline_data = getattr(parte, 'inline_data', None)
-                if inline_data is not None and inline_data.data:
-                    with open(output_path, 'wb') as f:
-                        f.write(inline_data.data)
-                    
-                    time.sleep(6) 
-                    return output_path
-                    
-            print(f"  ⚠️ Resposta sem dados de imagem (tentativa {tentativa + 1})")
         except Exception as e:
-            print(f"  ⚠️ Erro ao gerar imagem (tentativa {tentativa + 1}): {e}")
+            print(f"  ⚠️ Erro ao gerar prompt (tentativa {tentativa + 1}): {e}")
+            # Se der erro 504 ou 429, espera 10 segundos antes de tentar de novo
+            time.sleep(10)
             
-        time.sleep(10) 
-        
-    return None
+    # Se falhar todas as vezes, retorna uma string vazia ou um prompt genérico
+    return "3D Pixar-style animation, beautiful scene, family-friendly, 9:16 vertical composition"
 
 
 def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
