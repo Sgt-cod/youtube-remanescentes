@@ -46,8 +46,30 @@ FISHAUDIO_URL = "https://api.fish.audio/v1/tts"
 # ── Gemini — imagem hiper-realista ("Nano Banana") ──────────────────────────
 # ⚠️ Confirme o nome do modelo de imagem vigente na doc do Gemini — a Google
 #    tem trocado esses nomes com frequência (ex.: gemini-2.5-flash-image).
-DIFUSAO_MODEL_ID = os.environ.get('DIFUSAO_MODEL_ID', 'stablediffusionapi/disney-pixar-cartoon')
 HF_TOKEN = os.environ.get('HF_TOKEN')  # opcional — só usado no fallback via Hugging Face Inference API
+
+# ── Estilos visuais disponíveis — troque via variável de ambiente ESTILO_VISUAL ─────
+ESTILOS_VISUAIS = {
+    "pixar": {
+        "model_id": "stablediffusionapi/disney-pixar-cartoon",
+        "trigger_token": "",  # este checkpoint não precisa de token de ativação
+        "estilo_prompt": "3D Pixar-style animation, vibrant colors, family-friendly",
+    },
+    "ghibli": {
+        "model_id": "nitrosocke/Ghibli-Diffusion",
+        "trigger_token": "ghibli style",  # token de ativação exigido por este checkpoint
+        "estilo_prompt": "Studio Ghibli style, hand-painted, warm, family-friendly",
+    },
+}
+
+ESTILO_VISUAL = os.environ.get('ESTILO_VISUAL', 'pixar').lower()
+if ESTILO_VISUAL not in ESTILOS_VISUAIS:
+    print(f"⚠️ ESTILO_VISUAL '{ESTILO_VISUAL}' desconhecido — usando 'pixar' como padrão")
+    ESTILO_VISUAL = 'pixar'
+
+_config_estilo = ESTILOS_VISUAIS[ESTILO_VISUAL]
+DIFUSAO_MODEL_ID = os.environ.get('DIFUSAO_MODEL_ID', _config_estilo['model_id'])
+print(f"🎨 Estilo visual selecionado: {ESTILO_VISUAL} ({DIFUSAO_MODEL_ID})")
 
 # Configuração de curadoria
 USAR_CURACAO = os.environ.get('USAR_CURACAO', 'false').lower() == 'true' and CURACAO_DISPONIVEL
@@ -289,11 +311,11 @@ def transcrever_com_timestamps(audio_path):
 
 def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral):
     """
-    Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D,
-    otimizado para Stable Diffusion (NÃO Midjourney).
+    Usa o Gemini para criar um prompt de geração de imagem no estilo visual selecionado
+    (ESTILO_VISUAL), otimizado para Stable Diffusion (NÃO Midjourney).
     """
     prompt = f"""Você é um diretor de arte de animação, criando prompts para um modelo Stable Diffusion
-(NÃO é Midjourney) no estilo Pixar/Disney 3D infantil.
+(NÃO é Midjourney) no estilo "{_config_estilo['estilo_prompt']}", para um vídeo infantil.
 
 CONTEXTO GERAL DO VÍDEO (história bíblica infantil): {contexto_geral}
 
@@ -301,23 +323,26 @@ TRECHO DA NARRAÇÃO A ILUSTRAR: "{texto_segmento}"
 
 Crie um prompt de geração de imagem em INGLÊS. Regras OBRIGATÓRIAS e não-negociáveis:
 
-1. LIMITE DE TAMANHO: no máximo 50 palavras no total. O modelo usado só processa os primeiros ~75 tokens
-   e descarta o resto silenciosamente — um prompt longo demais faz a parte importante ser cortada.
+1. LIMITE DE TAMANHO: no máximo 45 palavras no total (o estilo visual já ocupa algumas). O modelo usado só
+   processa os primeiros ~75 tokens e descarta o resto silenciosamente — um prompt longo demais faz a parte
+   importante ser cortada.
 2. ORDEM DE PRIORIDADE: comece IMEDIATAMENTE pelo assunto principal — quem está na cena e o que está
-   fazendo, extraído do trecho da narração. Detalhes de estilo (Pixar, iluminação, cores) vêm DEPOIS,
-   nunca antes, e de forma breve (poucas palavras cada).
+   fazendo, extraído do trecho da narração. Detalhes de estilo vêm DEPOIS, nunca antes, e de forma breve.
 3. Personagens: descreva rapidamente roupa e cabelo de cada um (ex: "wearing a beige tunic, curly brown hair"),
    sem parágrafos longos — só o essencial pra reconhecer o personagem.
 4. NUNCA use sintaxe de Midjourney como "--ar", "--v", "--stylize" ou qualquer parâmetro com "--". Isso não é
    Midjourney e essas flags só desperdiçam tokens úteis. Escreva só descrição em linguagem natural.
-5. Sempre "3D Pixar-style animation, vibrant colors, family-friendly" (curto, ao final).
+5. NÃO inclua a descrição do estilo visual no seu prompt — ela será adicionada automaticamente depois.
 6. Nunca elementos gráficos, violentos ou assustadores — cena sempre acolhedora para crianças pequenas.
 
-Retorne APENAS o prompt final em inglês, sem explicações, sem aspas, sem markdown."""
+Retorne APENAS a descrição da cena/personagens em inglês, sem explicações, sem aspas, sem markdown."""
 
     resposta = model.generate_content(prompt)
-    prompt_final = resposta.text.strip()
-    return _limpar_prompt_imagem(prompt_final)
+    prompt_final = _limpar_prompt_imagem(resposta.text.strip())
+
+    # Monta o prompt final: [trigger_token do checkpoint] + [cena/personagens] + [estilo]
+    partes = [p for p in [_config_estilo['trigger_token'], prompt_final, _config_estilo['estilo_prompt']] if p]
+    return ", ".join(partes)
 
 
 def _limpar_prompt_imagem(prompt_texto):
