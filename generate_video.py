@@ -290,26 +290,44 @@ def transcrever_com_timestamps(audio_path):
 def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral):
     """
     Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D,
-    no nível de um diretor de arte de animação profissional.
+    otimizado para Stable Diffusion (NÃO Midjourney).
     """
-    prompt = f"""Você é um diretor de arte de animação, especializado em prompts para geração de imagens
-no estilo Pixar/DreamWorks (animação 3D infantil).
+    prompt = f"""Você é um diretor de arte de animação, criando prompts para um modelo Stable Diffusion
+(NÃO é Midjourney) no estilo Pixar/Disney 3D infantil.
 
 CONTEXTO GERAL DO VÍDEO (história bíblica infantil): {contexto_geral}
 
 TRECHO DA NARRAÇÃO A ILUSTRAR: "{texto_segmento}"
 
-Crie um prompt de geração de imagem em INGLÊS, extremamente detalhado, no nível de um diretor de arte de animação profissional. O prompt deve obrigatoriamente:
-- Especificar estilo "3D Pixar-style animation, Disney-Pixar character design, soft rounded shapes, big expressive eyes, warm cinematic lighting, vibrant colors, family-friendly, 9:16 vertical composition"
-- Descrever a cena, iluminação e composição de forma cinematográfica, adequada para crianças
-- Para CADA personagem presente na cena, descrever: cor e modelo da roupa (vestes de época bíblica), detalhes da roupa (textura, tecido, acessórios), cor do cabelo e comprimento do cabelo, expressão facial gentil/expressiva
-- Evitar QUALQUER elemento gráfico, violento ou assustador — a cena deve ser sempre acolhedora e apropriada para crianças pequenas, mesmo em momentos de tensão da história
-- Manter consistência visual de "livro de histórias bíblicas animado para crianças"
+Crie um prompt de geração de imagem em INGLÊS. Regras OBRIGATÓRIAS e não-negociáveis:
 
-Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
+1. LIMITE DE TAMANHO: no máximo 50 palavras no total. O modelo usado só processa os primeiros ~75 tokens
+   e descarta o resto silenciosamente — um prompt longo demais faz a parte importante ser cortada.
+2. ORDEM DE PRIORIDADE: comece IMEDIATAMENTE pelo assunto principal — quem está na cena e o que está
+   fazendo, extraído do trecho da narração. Detalhes de estilo (Pixar, iluminação, cores) vêm DEPOIS,
+   nunca antes, e de forma breve (poucas palavras cada).
+3. Personagens: descreva rapidamente roupa e cabelo de cada um (ex: "wearing a beige tunic, curly brown hair"),
+   sem parágrafos longos — só o essencial pra reconhecer o personagem.
+4. NUNCA use sintaxe de Midjourney como "--ar", "--v", "--stylize" ou qualquer parâmetro com "--". Isso não é
+   Midjourney e essas flags só desperdiçam tokens úteis. Escreva só descrição em linguagem natural.
+5. Sempre "3D Pixar-style animation, vibrant colors, family-friendly" (curto, ao final).
+6. Nunca elementos gráficos, violentos ou assustadores — cena sempre acolhedora para crianças pequenas.
+
+Retorne APENAS o prompt final em inglês, sem explicações, sem aspas, sem markdown."""
 
     resposta = model.generate_content(prompt)
-    return resposta.text.strip()
+    prompt_final = resposta.text.strip()
+    return _limpar_prompt_imagem(prompt_final)
+
+
+def _limpar_prompt_imagem(prompt_texto):
+    """
+    Rede de segurança: remove qualquer flag estilo Midjourney que tenha escapado
+    (--ar, --v, --stylize, etc.), caso o modelo de texto ignore a instrução.
+    """
+    prompt_limpo = re.sub(r'--\w+\s*[\d.:x]*', '', prompt_texto)
+    prompt_limpo = re.sub(r'\s{2,}', ' ', prompt_limpo).strip()
+    return prompt_limpo
 
 
 _pipeline_sd = None
