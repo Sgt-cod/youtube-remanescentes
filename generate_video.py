@@ -7,7 +7,6 @@ import time
 import sys
 from datetime import datetime
 import requests
-import urllib.parse
 import edge_tts
 import numpy as np
 from moviepy.editor import *
@@ -47,7 +46,8 @@ FISHAUDIO_URL = "https://api.fish.audio/v1/tts"
 # ── Gemini — imagem hiper-realista ("Nano Banana") ──────────────────────────
 # ⚠️ Confirme o nome do modelo de imagem vigente na doc do Gemini — a Google
 #    tem trocado esses nomes com frequência (ex.: gemini-2.5-flash-image).
-IMAGEM_MODEL_NAME = os.environ.get('GEMINI_IMAGE_MODEL', 'gemini-2.5-flash-image')
+DIFUSAO_MODEL_ID = os.environ.get('DIFUSAO_MODEL_ID', 'stablediffusionapi/disney-pixar-cartoon')
+HF_TOKEN = os.environ.get('HF_TOKEN')  # opcional — só usado no fallback via Hugging Face Inference API
 
 # Configuração de curadoria
 USAR_CURACAO = os.environ.get('USAR_CURACAO', 'false').lower() == 'true' and CURACAO_DISPONIVEL
@@ -56,7 +56,6 @@ CURACAO_TIMEOUT = int(os.environ.get('CURACAO_TIMEOUT', '3600'))
 genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_TEXT_MODEL = os.environ.get('GEMINI_TEXT_MODEL', 'gemini-3.5-flash-lite')
 model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
-imagem_model = genai.GenerativeModel(IMAGEM_MODEL_NAME)
 
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = json.load(f)
@@ -288,8 +287,7 @@ def transcrever_com_timestamps(audio_path):
 # IMAGENS — geração via IA (hiper-realista), substitui a busca em assets/
 # ============================================================
 
-
-def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral, tentativas=3):
+def gerar_prompt_imagem_profissional(texto_segmento, contexto_geral):
     """
     Usa o Gemini para criar um prompt de geração de imagem em estilo Pixar 3D,
     no nível de um diretor de arte de animação profissional.
@@ -310,58 +308,87 @@ Crie um prompt de geração de imagem em INGLÊS, extremamente detalhado, no ní
 
 Retorne APENAS o prompt final em inglês, sem explicações, sem aspas."""
 
+    resposta = model.generate_content(prompt)
+    return resposta.text.strip()
+
+
+_pipeline_sd = None
+
+
+def _carregar_pipeline_sd():
+    """Carrega o checkpoint Stable Diffusion estilo Pixar uma única vez (lazy load)."""
+    global _pipeline_sd
+    if _pipeline_sd is None:
+        import torch
+        from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+
+        print(f"🎨 Carregando checkpoint de imagem ({DIFUSAO_MODEL_ID})... pode levar alguns minutos na 1ª vez.")
+        _pipeline_sd = StableDiffusionPipeline.from_pretrained(
+            DIFUSAO_MODEL_ID,
+            torch_dtype=torch.float32,  # CPU não se beneficia de float16
+            safety_checker=None
+        )
+        _pipeline_sd.scheduler = DPMSolverMultistepScheduler.from_config(_pipeline_sd.scheduler.config)
+        _pipeline_sd = _pipeline_sd.to("cpu")
+    return _pipeline_sd
+
+
+def gerar_imagem_sd_local(prompt_imagem, output_path, steps=22, largura=576, altura=1024):
+    """
+    Gera a imagem localmente, no próprio runner do GitHub Actions, via Stable Diffusion.
+    100% gratuito (só consome minutos de Actions, que são ilimitados em repositório público).
+    """
+    try:
+        pipe = _carregar_pipeline_sd()
+        negative_prompt = ("photo, photorealistic, realistic, ugly, deformed, scary, "
+                            "violence, blood, gore, disturbing, text, watermark, signature")
+        imagem = pipe(
+            prompt=prompt_imagem,
+            negative_prompt=negative_prompt,
+            num_inference_steps=steps,
+            guidance_scale=7.0,
+            width=largura,
+            height=altura
+        ).images[0]
+        imagem.save(output_path)
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Erro na geração local (Stable Diffusion): {e}")
+        return None
+
+
+def gerar_imagem_hf_api(prompt_imagem, output_path):
+    """
+    Fallback opcional via Hugging Face Inference API (serverless).
+    Só é usado se a geração local falhar E a secret HF_TOKEN estiver configurada.
+    Sujeito a fila/cold start — por isso não é a via principal.
+    """
+    if not HF_TOKEN:
+        return None
+    try:
+        from huggingface_hub import InferenceClient
+        client = InferenceClient(token=HF_TOKEN)
+        imagem = client.text_to_image(prompt_imagem, model=DIFUSAO_MODEL_ID)
+        imagem.save(output_path)
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Erro no fallback via Hugging Face API: {e}")
+        return None
+
+
+def gerar_imagem_ia(prompt_imagem, output_path, tentativas=2):
+    """Gera a imagem estilo Pixar: tenta local (Stable Diffusion) e cai para Hugging Face API se falhar."""
     for tentativa in range(tentativas):
-        try:
-            resposta = model.generate_content(prompt)
-            # Dá um tempinho de respiro para não estourar a cota de RPM
-            time.sleep(3) 
-            return resposta.text.strip()
-            
-        except Exception as e:
-            print(f"  ⚠️ Erro ao gerar prompt (tentativa {tentativa + 1}): {e}")
-            # Se der erro 504 ou 429, espera 45 segundos antes de tentar de novo
-            time.sleep(45)
-            
-    # Se falhar todas as vezes, retorna uma string vazia ou um prompt genérico
-    return "3D Pixar-style animation, beautiful scene, family-friendly, 9:16 vertical composition"
+        resultado = gerar_imagem_sd_local(prompt_imagem, output_path)
+        if resultado:
+            return resultado
 
+        print(f"  ⚠️ Tentativa local {tentativa + 1} falhou — tentando fallback via Hugging Face API...")
+        resultado = gerar_imagem_hf_api(prompt_imagem, output_path)
+        if resultado:
+            return resultado
 
-import requests
-import urllib.parse
-import time
-
-def gerar_imagem_ia(prompt_imagem, output_path, tentativas=3):
-    """Gera uma imagem via Pollinations.ai (100% Gratuito, sem API Key)"""
-    
-    # Adiciona detalhes extras para garantir a qualidade 3D Pixar
-    prompt_completo = prompt_imagem + ", 3d pixar style, high quality, masterpiece"
-    
-    # Codifica o texto para o formato de link de internet
-    prompt_formatado = urllib.parse.quote(prompt_completo)
-    
-    # Cria a URL com proporção 9:16 (vertical para Shorts) e sem marca d'água
-    url = f"https://image.pollinations.ai/prompt/{prompt_formatado}?width=768&height=1344&nologo=true"
-    
-    for tentativa in range(tentativas):
-        try:
-            print(f"  🎨 Gerando imagem gratuitamente (tentativa {tentativa + 1})...")
-            # Faz o download direto da imagem
-            resposta = requests.get(url, timeout=60)
-            
-            if resposta.status_code == 200:
-                with open(output_path, 'wb') as f:
-                    f.write(resposta.content)
-                print("  ✅ Imagem gerada com sucesso!")
-                time.sleep(3) # Pausa leve só por garantia
-                return output_path
-            else:
-                print(f"  ⚠️ Erro do servidor: {resposta.status_code}")
-                
-        except Exception as e:
-            print(f"  ⚠️ Erro ao baixar imagem: {e}")
-            
-        time.sleep(10) # Pausa antes de tentar de novo
-        
+        time.sleep(5)
     return None
 
 
