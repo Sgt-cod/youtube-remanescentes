@@ -20,6 +20,7 @@ tqdm==4.66.1
 requests==2.31.0
 instagrapi
 tweepy
+peft
 diffusers
 transformers
 accelerate
