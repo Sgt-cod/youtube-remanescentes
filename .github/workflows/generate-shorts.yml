@@ -2,13 +2,13 @@ name: Gerar Shorts
 
 on:
   schedule:
-    - cron: '0 6 * * *'   # 03:00 BRT
-    - cron: '0 9 * * *'   # 06:00 BRT
-    - cron: '0 12 * * *'  # 09:00 BRT
-    - cron: '0 15 * * *'  # 12:00 BRT
+  #  - cron: '0 6 * * *'   # 03:00 BRT
+  #  - cron: '0 9 * * *'   # 06:00 BRT
+  #  - cron: '0 12 * * *'  # 09:00 BRT
+  #  - cron: '0 15 * * *'  # 12:00 BRT
     - cron: '0 18 * * *'  # 15:00 BRT
-    - cron: '0 21 * * *'  # 18:00 BRT
-    - cron: '0 0 * * *'   # 21:00 BRT
+  #  - cron: '0 21 * * *'  # 18:00 BRT
+  #  - cron: '0 0 * * *'   # 21:00 BRT
   workflow_dispatch:
 
 permissions:
