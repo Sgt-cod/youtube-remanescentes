@@ -345,6 +345,13 @@ Crie um prompt de geração de imagem em INGLÊS. Regras OBRIGATÓRIAS e não-ne
     inteiro, EXCETO quando a ação da narração exigir claramente ver o corpo todo (ex: andando, correndo).
     Modelos pequenos erram mais anatomia (pernas/braços extras) em corpo inteiro — enquadramento mais
     fechado reduz esse risco.
+3c. NÚMERO DE PERSONAGENS: SEMPRE que o trecho da narração permitir, mostre APENAS 1 personagem na cena
+    (o mais relevante no momento), mesmo que a narração cite mais de um nome. Se dois personagens
+    conversam ou interagem, escolha ilustrar o foco em UM deles (ex: reação, close, ação individual) em vez
+    de compor os dois juntos no mesmo quadro. Cenas com 2+ personagens interagindo são o principal ponto
+    de falha do modelo (membros duplicados, figuras sobrepostas/flutuando) — só use 2 personagens juntos
+    se for absolutamente essencial ao sentido da cena, e nesse caso mantenha a composição bem simples
+    (ex: um ao lado do outro, mesma distância da câmera, sem sobreposição).
 4. NUNCA use sintaxe de Midjourney como "--ar", "--v", "--stylize" ou qualquer parâmetro com "--". Isso não é
    Midjourney e essas flags só desperdiçam tokens úteis. Escreva só descrição em linguagem natural.
 5. NÃO inclua a descrição do estilo visual no seu prompt — ela será adicionada automaticamente depois.
