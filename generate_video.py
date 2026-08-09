@@ -49,15 +49,20 @@ FISHAUDIO_URL = "https://api.fish.audio/v1/tts"
 HF_TOKEN = os.environ.get('HF_TOKEN')  # opcional — só usado no fallback via Hugging Face Inference API
 
 # ── Estilos visuais disponíveis — troque via variável de ambiente ESTILO_VISUAL ─────
+# Arquitetura: SDXL base + LoRA de estilo (bem mais coerente que SD1.5, ainda 100% gratuito)
+SDXL_BASE_MODEL = os.environ.get('SDXL_BASE_MODEL', 'stabilityai/stable-diffusion-xl-base-1.0')
+
 ESTILOS_VISUAIS = {
     "pixar": {
-        "model_id": "stablediffusionapi/disney-pixar-cartoon",
-        "trigger_token": "",  # este checkpoint não precisa de token de ativação
+        "lora_id": "ntc-ai/SDXL-LoRA-slider.pixar-style",
+        "lora_weight_name": "pixar-style.safetensors",
+        "trigger_token": "pixar-style",
         "estilo_prompt": "3D Pixar-style animation, vibrant colors, family-friendly",
     },
     "ghibli": {
-        "model_id": "nitrosocke/Ghibli-Diffusion",
-        "trigger_token": "ghibli style",  # token de ativação exigido por este checkpoint
+        "lora_id": "ntc-ai/SDXL-LoRA-slider.Studio-Ghibli-style",
+        "lora_weight_name": "Studio Ghibli style.safetensors",
+        "trigger_token": "Studio Ghibli style",
         "estilo_prompt": "Studio Ghibli style, hand-painted, warm, family-friendly",
     },
 }
@@ -68,8 +73,8 @@ if ESTILO_VISUAL not in ESTILOS_VISUAIS:
     ESTILO_VISUAL = 'pixar'
 
 _config_estilo = ESTILOS_VISUAIS[ESTILO_VISUAL]
-DIFUSAO_MODEL_ID = os.environ.get('DIFUSAO_MODEL_ID', _config_estilo['model_id'])
-print(f"🎨 Estilo visual selecionado: {ESTILO_VISUAL} ({DIFUSAO_MODEL_ID})")
+DIFUSAO_MODEL_ID = SDXL_BASE_MODEL  # usado no fallback via Hugging Face API (sem o LoRA — ver aviso abaixo)
+print(f"🎨 Estilo visual selecionado: {ESTILO_VISUAL} (SDXL base + LoRA {_config_estilo['lora_id']})")
 
 # Configuração de curadoria
 USAR_CURACAO = os.environ.get('USAR_CURACAO', 'false').lower() == 'true' and CURACAO_DISPONIVEL
@@ -366,61 +371,53 @@ def _limpar_prompt_imagem(prompt_texto):
 
 
 _pipeline_sd = None
-_easynegative_carregado = False
 
 
 def _carregar_pipeline_sd():
-    """Carrega o checkpoint Stable Diffusion do estilo configurado uma única vez (lazy load)."""
-    global _pipeline_sd, _easynegative_carregado
+    """Carrega o SDXL base + LoRA do estilo configurado uma única vez (lazy load)."""
+    global _pipeline_sd
     if _pipeline_sd is None:
         import torch
-        from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
+        from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 
-        print(f"🎨 Carregando checkpoint de imagem ({DIFUSAO_MODEL_ID})... pode levar alguns minutos na 1ª vez.")
-        _pipeline_sd = StableDiffusionPipeline.from_pretrained(
-            DIFUSAO_MODEL_ID,
+        print(f"🎨 Carregando SDXL base ({SDXL_BASE_MODEL})... pode levar vários minutos na 1ª vez (é pesado).")
+        _pipeline_sd = StableDiffusionXLPipeline.from_pretrained(
+            SDXL_BASE_MODEL,
             torch_dtype=torch.float32,  # CPU não se beneficia de float16
-            safety_checker=None
+            use_safetensors=True
         )
-        _pipeline_sd.scheduler = DPMSolverMultistepScheduler.from_config(_pipeline_sd.scheduler.config)
+        _pipeline_sd.scheduler = DPMSolverMultistepScheduler.from_config(
+            _pipeline_sd.scheduler.config, use_karras_sigmas=True
+        )
         _pipeline_sd = _pipeline_sd.to("cpu")
 
-        # EasyNegative: embedding gratuito e amplamente usado que reduz erros de anatomia
-        # (membros extras/faltando, mãos ruins, etc). Se o checkpoint não for compatível
-        # por algum motivo, seguimos sem ele — não é crítico, só ajuda.
-        try:
-            _pipeline_sd.load_textual_inversion(
-                "gsdf/EasyNegative",
-                weight_name="EasyNegative.safetensors",
-                token="easynegative"
-            )
-            _easynegative_carregado = True
-            print("   ✅ EasyNegative carregado (ajuda a corrigir anatomia)")
-        except Exception as e:
-            print(f"   ⚠️ Não foi possível carregar EasyNegative: {e} — seguindo sem ele")
-            _easynegative_carregado = False
+        print(f"🎨 Aplicando LoRA de estilo ({_config_estilo['lora_id']})...")
+        _pipeline_sd.load_lora_weights(
+            _config_estilo['lora_id'],
+            weight_name=_config_estilo['lora_weight_name'],
+            adapter_name="estilo"
+        )
+        _pipeline_sd.set_adapters(["estilo"], adapter_weights=[1.3])
 
     return _pipeline_sd
 
 
-def gerar_imagem_sd_local(prompt_imagem, output_path, steps=30, largura=576, altura=1024):
+def gerar_imagem_sd_local(prompt_imagem, output_path, steps=28, largura=832, altura=1216):
     """
-    Gera a imagem localmente, no próprio runner do GitHub Actions, via Stable Diffusion.
+    Gera a imagem localmente, no próprio runner do GitHub Actions, via SDXL + LoRA de estilo.
     100% gratuito (só consome minutos de Actions, que são ilimitados em repositório público).
+    Resolução 832x1216 é uma das proporções nativas do SDXL, próxima de 9:16.
     """
     try:
         pipe = _carregar_pipeline_sd()
 
+        # SDXL erra bem menos anatomia que SD1.5 por padrão — negative_prompt mais enxuto.
         negative_prompt = (
             "photo, photorealistic, realistic, ugly, deformed, scary, violence, blood, gore, "
             "disturbing, text, watermark, signature, "
-            "bad anatomy, extra limbs, extra legs, extra arms, missing limbs, missing legs, "
-            "missing arms, three legs, fused limbs, mutated hands, bad hands, poorly drawn hands, "
-            "extra fingers, disfigured, malformed, long neck, cloned face"
+            "bad anatomy, extra limbs, extra legs, extra arms, missing limbs, "
+            "mutated hands, bad hands, extra fingers, disfigured, malformed, cloned face"
         )
-        if _easynegative_carregado:
-            negative_prompt = "easynegative, " + negative_prompt
-
         imagem = pipe(
             prompt=prompt_imagem,
             negative_prompt=negative_prompt,
