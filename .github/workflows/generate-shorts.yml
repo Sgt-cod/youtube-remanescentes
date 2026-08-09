@@ -44,6 +44,13 @@ jobs:
         with:
           path: ~/.cache/huggingface
           key: sd-disney-pixar-cartoon
+
+      - name: Upload vídeo de teste
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: video-teste
+          path: videos/*.mp4
       
       - name: Gerar short
         env:
