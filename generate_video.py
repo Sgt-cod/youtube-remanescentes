@@ -75,6 +75,12 @@ print(f"🎨 Estilo visual selecionado: {ESTILO_VISUAL} ({DIFUSAO_MODEL_ID})")
 USAR_CURACAO = os.environ.get('USAR_CURACAO', 'false').lower() == 'true' and CURACAO_DISPONIVEL
 CURACAO_TIMEOUT = int(os.environ.get('CURACAO_TIMEOUT', '3600'))
 
+# ── Modo de teste rápido (não usar em produção) ──────────────────────────────
+# LIMITE_SEGMENTOS: processa só os N primeiros segmentos (0 = sem limite, roda tudo)
+# PULAR_UPLOAD: gera o vídeo mas NÃO publica no YouTube — fica só como artefato/local
+LIMITE_SEGMENTOS = int(os.environ.get('LIMITE_SEGMENTOS', '0'))
+PULAR_UPLOAD = os.environ.get('PULAR_UPLOAD', 'false').lower() == 'true'
+
 genai.configure(api_key=GEMINI_API_KEY)
 GEMINI_TEXT_MODEL = os.environ.get('GEMINI_TEXT_MODEL', 'gemini-3.5-flash-lite')
 model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
@@ -438,11 +444,15 @@ def gerar_imagem_ia(prompt_imagem, output_path, tentativas=2):
 def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
     """
     Substitui a antiga busca em assets/: segmenta o áudio via Whisper (timestamps reais)
-    e gera uma imagem hiper-realista por IA para cada segmento.
+    e gera uma imagem por IA para cada segmento, no estilo visual configurado.
     """
     print("🧠 Transcrevendo áudio com Whisper para obter timestamps reais...")
     segmentos_whisper = transcrever_com_timestamps(audio_path)
     print(f"   {len(segmentos_whisper)} segmentos identificados pelo Whisper")
+
+    if LIMITE_SEGMENTOS > 0:
+        segmentos_whisper = segmentos_whisper[:LIMITE_SEGMENTOS]
+        print(f"   ✂️ MODO TESTE: limitado a {len(segmentos_whisper)} segmento(s) (LIMITE_SEGMENTOS={LIMITE_SEGMENTOS})")
 
     midias_sincronizadas = []
     ultima_imagem_ok = None
@@ -878,6 +888,13 @@ def main():
         print("❌ Não foi possível gerar mídias — abortando este ciclo.")
         return
 
+    if LIMITE_SEGMENTOS > 0:
+        # Em modo teste, o vídeo deve durar só o que os segmentos truncados cobrem —
+        # não a duração do áudio completo (senão o último clip seria esticado à toa).
+        ultimo = midias_sincronizadas[-1]
+        duracao = ultimo['inicio'] + ultimo['duracao']
+        print(f"   ✂️ MODO TESTE: duração do vídeo ajustada para {duracao:.1f}s")
+
     # Definir video_path
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     video_path = f'{VIDEOS_DIR}/{VIDEO_TYPE}_{timestamp}.mp4'
@@ -939,6 +956,15 @@ def main():
                 print(f"⚠️ Erro: {e}")
 
     # Upload YouTube
+    if PULAR_UPLOAD:
+        print("\n⏭️ PULAR_UPLOAD ativo — vídeo NÃO será publicado no YouTube.")
+        print(f"   Vídeo disponível em: {video_path}")
+        print("   Configure o step de upload de artefato no .yml para poder baixá-lo e conferir.")
+        print("\n" + "=" * 60)
+        print("✅ TESTE CONCLUÍDO (sem publicação)")
+        print("=" * 60)
+        return
+
     print("\n📤 Upload YouTube...")
     try:
         video_id = fazer_upload_youtube(
