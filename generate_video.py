@@ -336,6 +336,10 @@ Crie um prompt de geração de imagem em INGLÊS. Regras OBRIGATÓRIAS e não-ne
    fazendo, extraído do trecho da narração. Detalhes de estilo vêm DEPOIS, nunca antes, e de forma breve.
 3. Personagens: descreva rapidamente roupa e cabelo de cada um (ex: "wearing a beige tunic, curly brown hair"),
    sem parágrafos longos — só o essencial pra reconhecer o personagem.
+3b. ENQUADRAMENTO: prefira "medium shot" ou "upper body shot" (da cintura/peito pra cima) em vez de corpo
+    inteiro, EXCETO quando a ação da narração exigir claramente ver o corpo todo (ex: andando, correndo).
+    Modelos pequenos erram mais anatomia (pernas/braços extras) em corpo inteiro — enquadramento mais
+    fechado reduz esse risco.
 4. NUNCA use sintaxe de Midjourney como "--ar", "--v", "--stylize" ou qualquer parâmetro com "--". Isso não é
    Midjourney e essas flags só desperdiçam tokens úteis. Escreva só descrição em linguagem natural.
 5. NÃO inclua a descrição do estilo visual no seu prompt — ela será adicionada automaticamente depois.
@@ -362,11 +366,12 @@ def _limpar_prompt_imagem(prompt_texto):
 
 
 _pipeline_sd = None
+_easynegative_carregado = False
 
 
 def _carregar_pipeline_sd():
-    """Carrega o checkpoint Stable Diffusion estilo Pixar uma única vez (lazy load)."""
-    global _pipeline_sd
+    """Carrega o checkpoint Stable Diffusion do estilo configurado uma única vez (lazy load)."""
+    global _pipeline_sd, _easynegative_carregado
     if _pipeline_sd is None:
         import torch
         from diffusers import StableDiffusionPipeline, DPMSolverMultistepScheduler
@@ -379,18 +384,43 @@ def _carregar_pipeline_sd():
         )
         _pipeline_sd.scheduler = DPMSolverMultistepScheduler.from_config(_pipeline_sd.scheduler.config)
         _pipeline_sd = _pipeline_sd.to("cpu")
+
+        # EasyNegative: embedding gratuito e amplamente usado que reduz erros de anatomia
+        # (membros extras/faltando, mãos ruins, etc). Se o checkpoint não for compatível
+        # por algum motivo, seguimos sem ele — não é crítico, só ajuda.
+        try:
+            _pipeline_sd.load_textual_inversion(
+                "gsdf/EasyNegative",
+                weight_name="EasyNegative.safetensors",
+                token="easynegative"
+            )
+            _easynegative_carregado = True
+            print("   ✅ EasyNegative carregado (ajuda a corrigir anatomia)")
+        except Exception as e:
+            print(f"   ⚠️ Não foi possível carregar EasyNegative: {e} — seguindo sem ele")
+            _easynegative_carregado = False
+
     return _pipeline_sd
 
 
-def gerar_imagem_sd_local(prompt_imagem, output_path, steps=22, largura=576, altura=1024):
+def gerar_imagem_sd_local(prompt_imagem, output_path, steps=30, largura=576, altura=1024):
     """
     Gera a imagem localmente, no próprio runner do GitHub Actions, via Stable Diffusion.
     100% gratuito (só consome minutos de Actions, que são ilimitados em repositório público).
     """
     try:
         pipe = _carregar_pipeline_sd()
-        negative_prompt = ("photo, photorealistic, realistic, ugly, deformed, scary, "
-                            "violence, blood, gore, disturbing, text, watermark, signature")
+
+        negative_prompt = (
+            "photo, photorealistic, realistic, ugly, deformed, scary, violence, blood, gore, "
+            "disturbing, text, watermark, signature, "
+            "bad anatomy, extra limbs, extra legs, extra arms, missing limbs, missing legs, "
+            "missing arms, three legs, fused limbs, mutated hands, bad hands, poorly drawn hands, "
+            "extra fingers, disfigured, malformed, long neck, cloned face"
+        )
+        if _easynegative_carregado:
+            negative_prompt = "easynegative, " + negative_prompt
+
         imagem = pipe(
             prompt=prompt_imagem,
             negative_prompt=negative_prompt,
