@@ -381,23 +381,28 @@ def _carregar_pipeline_sd():
         from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 
         print(f"🎨 Carregando SDXL base ({SDXL_BASE_MODEL})... pode levar vários minutos na 1ª vez (é pesado).")
-        _pipeline_sd = StableDiffusionXLPipeline.from_pretrained(
+        pipeline_temp = StableDiffusionXLPipeline.from_pretrained(
             SDXL_BASE_MODEL,
             torch_dtype=torch.float32,  # CPU não se beneficia de float16
             use_safetensors=True
         )
-        _pipeline_sd.scheduler = DPMSolverMultistepScheduler.from_config(
-            _pipeline_sd.scheduler.config, use_karras_sigmas=True
+        pipeline_temp.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipeline_temp.scheduler.config, use_karras_sigmas=True
         )
-        _pipeline_sd = _pipeline_sd.to("cpu")
+        pipeline_temp = pipeline_temp.to("cpu")
 
         print(f"🎨 Aplicando LoRA de estilo ({_config_estilo['lora_id']})...")
-        _pipeline_sd.load_lora_weights(
+        # Se isso falhar (ex: peft não instalado), a exceção sobe e _pipeline_sd
+        # continua None — a próxima chamada tenta o carregamento completo de novo,
+        # em vez de silenciosamente gerar sem o estilo aplicado.
+        pipeline_temp.load_lora_weights(
             _config_estilo['lora_id'],
             weight_name=_config_estilo['lora_weight_name'],
             adapter_name="estilo"
         )
-        _pipeline_sd.set_adapters(["estilo"], adapter_weights=[1.3])
+        pipeline_temp.set_adapters(["estilo"], adapter_weights=[1.3])
+
+        _pipeline_sd = pipeline_temp  # só marca como pronto depois de tudo funcionar
 
     return _pipeline_sd
 
@@ -478,11 +483,16 @@ def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
     print(f"   {len(segmentos_whisper)} segmentos identificados pelo Whisper")
 
     if LIMITE_SEGMENTOS > 0:
+        total_real_segmentos = len(segmentos_whisper)  # guarda o total real antes de truncar, pra projeção
         segmentos_whisper = segmentos_whisper[:LIMITE_SEGMENTOS]
         print(f"   ✂️ MODO TESTE: limitado a {len(segmentos_whisper)} segmento(s) (LIMITE_SEGMENTOS={LIMITE_SEGMENTOS})")
+        print(f"   📊 O roteiro completo teria {total_real_segmentos} segmentos — usarei esse número pra projeção de tempo")
+    else:
+        total_real_segmentos = len(segmentos_whisper)
 
     midias_sincronizadas = []
     ultima_imagem_ok = None
+    tempos_geracao = []
 
     for i, seg in enumerate(segmentos_whisper):
         duracao_seg = seg['fim'] - seg['inicio']
@@ -493,7 +503,12 @@ def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
 
         prompt_imagem = gerar_prompt_imagem_profissional(seg['texto'], titulo_video)
         caminho_imagem = f"{ASSETS_DIR}/gerado_{i:03d}.png"
+
+        _inicio_geracao = time.time()
         resultado = gerar_imagem_ia(prompt_imagem, caminho_imagem)
+        _duracao_geracao = time.time() - _inicio_geracao
+        tempos_geracao.append(_duracao_geracao)
+        print(f"  ⏱️ Esta imagem levou {_duracao_geracao / 60:.1f} min")
 
         if resultado:
             ultima_imagem_ok = resultado
@@ -512,6 +527,30 @@ def gerar_midias_sincronizadas_ia(roteiro, audio_path, titulo_video):
             })
 
     print(f"\n✅ Total: {len(midias_sincronizadas)}/{len(segmentos_whisper)} segmentos com imagem")
+
+    # ── Relatório de tempo, pra decidir se SDXL em CPU é viável ────────────────────
+    if tempos_geracao:
+        print("\n" + "=" * 60)
+        print("⏱️  RELATÓRIO DE TEMPO DE GERAÇÃO")
+        print("=" * 60)
+        for idx, t in enumerate(tempos_geracao, 1):
+            rotulo = " (inclui carregar o modelo pela 1ª vez)" if idx == 1 else ""
+            print(f"   Imagem {idx}: {t / 60:.1f} min{rotulo}")
+
+        if len(tempos_geracao) > 1:
+            # Exclui a 1ª (tem custo fixo de carregar o modelo, distorce a média)
+            media_sem_primeira = sum(tempos_geracao[1:]) / len(tempos_geracao[1:])
+            print(f"\n   Média por imagem (excluindo a 1ª): {media_sem_primeira / 60:.1f} min")
+            projecao = media_sem_primeira * total_real_segmentos / 60
+            print(f"   📊 Projeção para vídeo completo ({total_real_segmentos} segmentos): "
+                  f"~{projecao:.0f} min (~{projecao / 60:.1f}h) só de geração de imagem")
+            if projecao / 60 > 5:
+                print("   ⚠️ Isso provavelmente ultrapassa o limite de 6h por job do GitHub Actions!")
+        else:
+            print("\n   ℹ️ Só 1 imagem gerada — rode com LIMITE_SEGMENTOS=3 pra ter uma média mais confiável")
+            print("      (a 1ª imagem sempre inclui o tempo de carregar o modelo, não é representativa sozinha)")
+        print("=" * 60)
+
 
     # CURADORIA (Telegram) — fluxo mantido, agora sobre imagens geradas por IA
     if USAR_CURACAO:
