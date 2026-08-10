@@ -2,13 +2,7 @@ name: Gerar Shorts
 
 on:
   schedule:
-  #  - cron: '0 6 * * *'   # 03:00 BRT
-  #  - cron: '0 9 * * *'   # 06:00 BRT
-  #  - cron: '0 12 * * *'  # 09:00 BRT
-  #  - cron: '0 15 * * *'  # 12:00 BRT
-    - cron: '0 18 * * *'  # 15:00 BRT
-  #  - cron: '0 21 * * *'  # 18:00 BRT
-  #  - cron: '0 0 * * *'   # 21:00 BRT
+    - cron: '0 10 * * *'  # 07:00 BRT (UTC-3), todos os dias
   workflow_dispatch:
 
 permissions:
@@ -17,65 +11,45 @@ permissions:
 jobs:
   gerar-short:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout código
         uses: actions/checkout@v3
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      
+
       - name: Configurar Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.10'
-      
+
       - name: Instalar FFmpeg e ImageMagick
         run: |
           sudo apt-get update
           sudo apt-get install -y ffmpeg imagemagick
-      
+
       - name: Instalar dependências Python
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Upload vídeo de teste
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: video-teste
-          path: videos/*.mp4
-      
       - name: Gerar short
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           PEXELS_API_KEY: ${{ secrets.PEXELS_API_KEY }}
           YOUTUBE_CREDENTIALS: ${{ secrets.YOUTUBE_CREDENTIALS }}
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TELEGRAM_CANAL_ID: ${{ secrets.TELEGRAM_CANAL_ID }}
           FISHAUDIO_API_KEY: ${{ secrets.FISHAUDIO_API_KEY }}
           FISHAUDIO_VOICE_ID: ${{ secrets.FISHAUDIO_VOICE_ID }}
-          BLOGGER_BLOG_ID: ${{ secrets.BLOGGER_BLOG_ID }}
-          BLOGGER_CREDENTIALS: ${{ secrets.BLOGGER_CREDENTIALS }}
-          CANAL_YOUTUBE_URL: ${{ secrets.CANAL_YOUTUBE_URL }}
-          TWITTER_API_KEY: ${{ secrets.TWITTER_API_KEY }}
-          TWITTER_API_SECRET: ${{ secrets.TWITTER_API_SECRET }}
-          TWITTER_ACCESS_TOKEN: ${{ secrets.TWITTER_ACCESS_TOKEN }}
-          TWITTER_ACCESS_TOKEN_SECRET: ${{ secrets.TWITTER_ACCESS_TOKEN_SECRET }}
-          INSTAGRAM_USERNAME: ${{ secrets.INSTAGRAM_USERNAME }}
-          INSTAGRAM_PASSWORD: ${{ secrets.INSTAGRAM_PASSWORD }}
-          USAR_CURACAO: true
-          CURACAO_TIMEOUT: 3600
+          USAR_CURACAO: "false"
           VIDEO_TYPE: short
-          GITHUB_REPO: ${{ github.repository }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-       #   ESTILO_VISUAL: "ghibli"
-       #   LIMITE_SEGMENTOS: "0"
-       #   PULAR_UPLOAD: "true"
+          # ── Descomente pra testar sem publicar / mais rápido ──────────────
+          # PULAR_UPLOAD: "true"
+          # LIMITE_CLIPES_TESTE: "2"
+          # ── Ajustes opcionais (já têm padrão sensato no código) ───────────
+          # DURACAO_MAXIMA_CLIPE: "20"
+          # ATIVAR_LEGENDA: "true"
         run: python generate_video.py
-      
+
       - name: Commit logs atualizados
         run: |
           git config --local user.email "action@github.com"
@@ -83,12 +57,13 @@ jobs:
           git fetch origin main
           git checkout main
           git pull origin main --rebase
-          touch videos_gerados.json
-          git add -f videos_gerados.json
+          touch videos_gerados.json temas_usados.json
+          git add -f videos_gerados.json temas_usados.json
           git diff --staged --quiet || git commit -m "📱 Novo short gerado - $(date +'%Y-%m-%d %H:%M')"
           git push origin main || git push --force-with-lease origin main
-      
+
       - name: Upload short como artefato
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: short-${{ github.run_number }}
