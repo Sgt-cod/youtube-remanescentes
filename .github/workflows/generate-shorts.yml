@@ -71,9 +71,9 @@ jobs:
           GITHUB_REPO: ${{ github.repository }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          ESTILO_VISUAL: "ghibli"
-          LIMITE_SEGMENTOS: "0"
-          PULAR_UPLOAD: "true"
+       #   ESTILO_VISUAL: "ghibli"
+       #   LIMITE_SEGMENTOS: "0"
+       #   PULAR_UPLOAD: "true"
         run: python generate_video.py
       
       - name: Commit logs atualizados
