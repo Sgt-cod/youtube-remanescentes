@@ -7,7 +7,6 @@ import time
 from datetime import datetime
 import requests
 import edge_tts
-import numpy as np
 from moviepy.editor import *
 from google import generativeai as genai
 from google.oauth2.credentials import Credentials
@@ -48,6 +47,22 @@ CURACAO_TIMEOUT = int(os.environ.get('CURACAO_TIMEOUT', '3600'))
 LIMITE_CLIPES_TESTE = int(os.environ.get('LIMITE_CLIPES_TESTE', '0'))  # 0 = sem limite
 PULAR_UPLOAD = os.environ.get('PULAR_UPLOAD', 'false').lower() == 'true'
 
+# ── Estrutura de tempo do vídeo ──────────────────────────────────────────────
+SEGUNDOS_LEAD_IN = float(os.environ.get('SEGUNDOS_LEAD_IN', '3'))   # vídeo+música antes da narração
+SEGUNDOS_TAIL = float(os.environ.get('SEGUNDOS_TAIL', '5'))         # vídeo+música depois da narração
+SEGUNDOS_FADEOUT = float(os.environ.get('SEGUNDOS_FADEOUT', '2'))   # fade-out no final (vídeo + áudio)
+
+# ── Duração máxima por clipe do Pexels ───────────────────────────────────────
+# Evita que um único vídeo longo (ex: 2min) preencha o short inteiro sozinho.
+# Ajuste entre 15 e 30 conforme preferir mais ou menos variedade de cortes.
+DURACAO_MAXIMA_CLIPE = float(os.environ.get('DURACAO_MAXIMA_CLIPE', '20'))
+
+# ── Legenda automática ───────────────────────────────────────────────────────
+ATIVAR_LEGENDA = os.environ.get('ATIVAR_LEGENDA', 'true').lower() == 'true'
+# Liberation Sans Bold: clone livre, metricamente compatível com Helvetica/Arial,
+# normalmente já vem instalada em runners Ubuntu do GitHub Actions.
+LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', 'Liberation-Sans-Bold')
+
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
 
@@ -56,7 +71,7 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
 
 
 # ============================================================
-# TEMA DO DIA — rotação sem repetição, igual ao canal infantil
+# TEMA DO DIA — rotação sem repetição
 # ============================================================
 
 TEMAS_LOG_FILE = 'temas_usados.json'
@@ -80,10 +95,8 @@ def _salvar_tema_usado(tema):
 
 
 def escolher_tema_reflexao():
-    """Escolhe um tema de reflexão cristã/motivacional, priorizando a lista configurada."""
     temas_config = config.get('temas_reflexao', [])
     usados = _carregar_temas_usados()
-
     disponiveis = [t for t in temas_config if t not in usados]
 
     if disponiveis:
@@ -103,7 +116,6 @@ Responda APENAS com o nome do tema, curto. Ex: "confiança em tempos de incertez
 
 
 def gerar_titulo(tema):
-    """Gera um título de vídeo chamativo a partir do tema do dia."""
     prompt = f"""Baseado no tema de reflexão cristã "{tema}", crie um título de vídeo curto e chamativo
 para YouTube (estilo motivacional/inspiracional).
 
@@ -116,7 +128,6 @@ Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
     if inicio == -1 or fim == 0:
         return tema
-
     try:
         return json.loads(texto[inicio:fim]).get('titulo', tema)
     except Exception:
@@ -124,7 +135,6 @@ Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
 
 def gerar_roteiro(tema, tipo_video):
-    """Gera o roteiro de narração: versão curta (short) ou longa (vídeo de reflexão)."""
     if tipo_video == 'short':
         palavras_alvo = 180
         duracao_desc = '60-90 segundos'
@@ -170,11 +180,7 @@ def criar_audio_fishaudio(texto, output_file):
         "Content-Type": "application/json",
         "model": FISHAUDIO_MODEL  # vai no header, não no body
     }
-    payload = {
-        "text": texto,
-        "reference_id": FISHAUDIO_VOICE_ID,
-        "format": "mp3"
-    }
+    payload = {"text": texto, "reference_id": FISHAUDIO_VOICE_ID, "format": "mp3"}
 
     resp = requests.post(FISHAUDIO_URL, headers=headers, json=payload, timeout=180)
     resp.raise_for_status()
@@ -232,15 +238,85 @@ def criar_audio(texto, output_file):
 
 
 # ============================================================
-# PEXELS — busca e download de vídeos de banco, até cobrir a duração do áudio
+# LEGENDA AUTOMÁTICA — Whisper só pra timing, não pra seleção de vídeo
+# ============================================================
+
+_whisper_model = None
+
+
+def _carregar_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        print("🧠 Carregando modelo Whisper (base, CPU) para legendas...")
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+def transcrever_com_timestamps(audio_path):
+    whisper_model = _carregar_whisper()
+    segments, _info = whisper_model.transcribe(audio_path, language="pt", word_timestamps=False)
+    resultado = []
+    for seg in segments:
+        texto = seg.text.strip()
+        if texto:
+            resultado.append({'inicio': seg.start, 'fim': seg.end, 'texto': texto})
+    return resultado
+
+
+def gerar_clips_legenda(audio_path, largura, altura, offset=0.0):
+    """
+    Gera os clipes de texto (legenda) centralizados, sincronizados com a narração.
+    offset: quantos segundos a narração está deslocada no vídeo final (lead-in + intro, se houver).
+    Se falhar por qualquer motivo (ex: ImageMagick ausente), retorna lista vazia — não derruba o vídeo.
+    """
+    if not ATIVAR_LEGENDA:
+        return []
+
+    try:
+        segmentos = transcrever_com_timestamps(audio_path)
+    except Exception as e:
+        print(f"⚠️ Não foi possível transcrever para legenda: {e} — seguindo sem legenda")
+        return []
+
+    fontsize = max(28, int(largura / 18))
+    largura_texto = int(largura * 0.85)
+
+    clips = []
+    for seg in segmentos:
+        try:
+            txt_clip = TextClip(
+                seg['texto'],
+                fontsize=fontsize,
+                font=LEGENDA_FONTE,
+                color='white',
+                stroke_color='black',
+                stroke_width=max(1, fontsize // 18),
+                method='caption',
+                size=(largura_texto, None),
+                align='center'
+            )
+            txt_clip = txt_clip.set_position(('center', 'center'))
+            txt_clip = txt_clip.set_start(offset + seg['inicio'])
+            txt_clip = txt_clip.set_duration(seg['fim'] - seg['inicio'])
+            clips.append(txt_clip)
+        except Exception as e:
+            print(f"⚠️ Erro ao gerar legenda de um segmento: {e} — pulando esse trecho")
+            continue
+
+    if not clips:
+        print("⚠️ Nenhuma legenda gerada (possível problema com ImageMagick) — vídeo seguirá sem legenda")
+    else:
+        print(f"✅ {len(clips)} legenda(s) gerada(s)")
+
+    return clips
+
+
+# ============================================================
+# PEXELS — busca e download de vídeos, com limite de duração por clipe
 # ============================================================
 
 def escolher_termo_pesquisa(tema, roteiro):
-    """
-    Escolhe 1 termo de busca (em inglês) de uma lista PRÉ-VALIDADA por você no config.json.
-    Isso evita o problema de termos ambíguos (ex: 'space' trazendo salas em vez de espaço sideral) —
-    só termos já testados e confirmados como convergentes entram na lista.
-    """
     termos_validados = config.get('termos_pesquisa_validados', [])
     if not termos_validados:
         raise Exception("config.json precisa ter 'termos_pesquisa_validados' preenchido")
@@ -265,22 +341,17 @@ o texto, sem aspas, sem explicação):
 
 
 def _escolher_arquivo_video(video_files, largura_alvo):
-    """Escolhe, entre os arquivos disponíveis de um vídeo do Pexels, o mais próximo da largura alvo."""
     candidatos = [vf for vf in video_files if vf.get('width') and vf.get('height')]
     if not candidatos:
         return None
     return min(candidatos, key=lambda vf: abs(vf['width'] - largura_alvo))
 
 
-def pesquisar_videos_pexels(termo, orientacao, pagina=1, por_pagina=15):
-    """Busca vídeos no Pexels. orientacao: 'portrait' (shorts) ou 'landscape' (vídeo longo)."""
+def pesquisar_videos_pexels(termo, orientacao, pagina=1, por_pagina=40):
     headers = {"Authorization": PEXELS_API_KEY}
     params = {
-        "query": termo,
-        "orientation": orientacao,
-        "per_page": por_pagina,
-        "page": pagina,
-        "min_duration": 4,
+        "query": termo, "orientation": orientacao, "per_page": por_pagina,
+        "page": pagina, "min_duration": 4,
     }
     resp = requests.get("https://api.pexels.com/videos/search", headers=headers, params=params, timeout=30)
     resp.raise_for_status()
@@ -290,107 +361,74 @@ def pesquisar_videos_pexels(termo, orientacao, pagina=1, por_pagina=15):
 def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
     """
     Baixa vídeos do Pexels sequencialmente até cobrir duracao_alvo (segundos).
-    Retorna lista de dicts: {'path', 'inicio', 'duracao'}.
+    Cada clipe usa no máximo DURACAO_MAXIMA_CLIPE segundos (mesmo que o vídeo fonte seja mais longo),
+    o que aumenta a variedade de cortes e reduz a duração de cada vídeo repetido entre shorts.
+    Nunca repete o mesmo vídeo dentro do mesmo short (usados_ids é local a esta chamada).
+    Busca páginas adicionais automaticamente se a primeira não tiver candidatos suficientes.
     """
     largura_alvo = 1080 if orientacao == 'portrait' else 1920
     os.makedirs(f'{ASSETS_DIR}/pexels', exist_ok=True)
 
-    videos_encontrados = pesquisar_videos_pexels(termo, orientacao, por_pagina=40)
-    if not videos_encontrados:
-        print(f"  ⚠️ Nenhum vídeo encontrado para '{termo}' ({orientacao})")
-        return []
-
-    random.shuffle(videos_encontrados)
-
     clipes = []
     tempo_coberto = 0.0
     usados_ids = set()
+    pagina = 1
+    MAX_PAGINAS = 5
 
-    for video in videos_encontrados:
-        if tempo_coberto >= duracao_alvo:
-            break
+    while tempo_coberto < duracao_alvo and pagina <= MAX_PAGINAS:
         if LIMITE_CLIPES_TESTE > 0 and len(clipes) >= LIMITE_CLIPES_TESTE:
             print(f"   ✂️ MODO TESTE: limitado a {LIMITE_CLIPES_TESTE} clipe(s)")
             break
 
-        video_id = video.get('id')
-        if video_id in usados_ids:
-            continue
-        usados_ids.add(video_id)
+        videos_encontrados = pesquisar_videos_pexels(termo, orientacao, pagina=pagina)
+        if not videos_encontrados:
+            print(f"  ⚠️ Página {pagina} sem resultados para '{termo}' ({orientacao})")
+            break
 
-        arquivo = _escolher_arquivo_video(video.get('video_files', []), largura_alvo)
-        if not arquivo:
-            continue
+        random.shuffle(videos_encontrados)
 
-        destino = f"{ASSETS_DIR}/pexels/{video_id}.mp4"
-        try:
-            print(f"  ⬇️ Baixando vídeo {video_id} ({video.get('duration')}s, {arquivo['width']}x{arquivo['height']})...")
-            resp = requests.get(arquivo['link'], timeout=60)
-            resp.raise_for_status()
-            with open(destino, 'wb') as f:
-                f.write(resp.content)
-        except Exception as e:
-            print(f"  ⚠️ Erro ao baixar vídeo {video_id}: {e}")
-            continue
+        for video in videos_encontrados:
+            if tempo_coberto >= duracao_alvo:
+                break
+            if LIMITE_CLIPES_TESTE > 0 and len(clipes) >= LIMITE_CLIPES_TESTE:
+                break
 
-        duracao_disponivel = video.get('duration', 6)
-        duracao_uso = min(duracao_disponivel, duracao_alvo - tempo_coberto)
+            video_id = video.get('id')
+            if video_id in usados_ids:
+                continue
+            usados_ids.add(video_id)
 
-        clipes.append({
-            'path': destino,
-            'inicio': offset_inicio + tempo_coberto,
-            'duracao': duracao_uso
-        })
-        tempo_coberto += duracao_uso
+            arquivo = _escolher_arquivo_video(video.get('video_files', []), largura_alvo)
+            if not arquivo:
+                continue
+
+            destino = f"{ASSETS_DIR}/pexels/{video_id}.mp4"
+            try:
+                print(f"  ⬇️ Baixando vídeo {video_id} ({video.get('duration')}s, "
+                      f"{arquivo['width']}x{arquivo['height']})...")
+                resp = requests.get(arquivo['link'], timeout=60)
+                resp.raise_for_status()
+                with open(destino, 'wb') as f:
+                    f.write(resp.content)
+            except Exception as e:
+                print(f"  ⚠️ Erro ao baixar vídeo {video_id}: {e}")
+                continue
+
+            duracao_disponivel = video.get('duration', 6)
+            duracao_uso = min(duracao_disponivel, DURACAO_MAXIMA_CLIPE, duracao_alvo - tempo_coberto)
+
+            clipes.append({'path': destino, 'inicio': offset_inicio + tempo_coberto, 'duracao': duracao_uso})
+            tempo_coberto += duracao_uso
+
+        pagina += 1
 
     if tempo_coberto < duracao_alvo and clipes:
         print(f"  ⚠️ Cobertura parcial: {tempo_coberto:.1f}s/{duracao_alvo:.1f}s — "
-              f"último clipe será esticado no momento da montagem")
+              f"último clipe será esticado na montagem")
 
-    print(f"  ✅ {len(clipes)} clipe(s) baixado(s), cobrindo {tempo_coberto:.1f}s de {duracao_alvo:.1f}s")
+    print(f"  ✅ {len(clipes)} clipe(s) baixado(s) (máx {DURACAO_MAXIMA_CLIPE}s cada), "
+          f"cobrindo {tempo_coberto:.1f}s de {duracao_alvo:.1f}s")
     return clipes
-
-
-# ============================================================
-# TRANSIÇÃO "ONDA DE CALOR" (heat wave), estilo CapCut
-# ============================================================
-
-def _efeito_onda_calor(frame, t_relativo, duracao_transicao, direcao=1):
-    progresso = min(max(t_relativo / duracao_transicao, 0.0), 1.0) if duracao_transicao > 0 else 1.0
-    intensidade = (1 - progresso) * 18.0
-    if intensidade <= 0.2:
-        return frame
-
-    altura, largura = frame.shape[0], frame.shape[1]
-    linhas = np.arange(altura)
-    deslocamento = (intensidade * np.sin(linhas / 22.0 + t_relativo * 14 * direcao)).astype(np.int32)
-
-    idx_colunas = np.arange(largura)[None, :] - deslocamento[:, None]
-    idx_colunas = np.clip(idx_colunas, 0, largura - 1)
-    idx_colunas_expandido = np.repeat(idx_colunas[:, :, None], frame.shape[2], axis=2)
-
-    return np.take_along_axis(frame, idx_colunas_expandido, axis=1)
-
-
-def aplicar_transicao_onda_calor(clip, duracao_transicao=0.4, aparecendo=True):
-    duracao_transicao = min(duracao_transicao, clip.duration / 2) if clip.duration else duracao_transicao
-
-    if aparecendo:
-        def filtro(get_frame, t):
-            frame = get_frame(t)
-            if t < duracao_transicao:
-                return _efeito_onda_calor(frame, duracao_transicao - t, duracao_transicao, direcao=1)
-            return frame
-    else:
-        fim = clip.duration
-
-        def filtro(get_frame, t):
-            frame = get_frame(t)
-            if t > fim - duracao_transicao:
-                return _efeito_onda_calor(frame, t - (fim - duracao_transicao), duracao_transicao, direcao=-1)
-            return frame
-
-    return clip.fl(filtro)
 
 
 # ============================================================
@@ -398,11 +436,8 @@ def aplicar_transicao_onda_calor(clip, duracao_transicao=0.4, aparecendo=True):
 # ============================================================
 
 def _preparar_clip_pexels(item, largura, altura):
-    """Carrega, corta e redimensiona um clipe do Pexels pro formato alvo."""
     clip = VideoFileClip(item['path'])
-    duracao_disponivel = clip.duration
-
-    if duracao_disponivel > item['duracao']:
+    if clip.duration > item['duracao']:
         clip = clip.subclip(0, item['duracao'])
 
     clip = clip.resize(height=altura)
@@ -413,28 +448,17 @@ def _preparar_clip_pexels(item, largura, altura):
     if clip.size != (largura, altura):
         clip = clip.resize((largura, altura))
 
-    return clip.without_audio()
+    return clip.without_audio().set_start(item['inicio'])
 
 
 def _montar_clips_pexels(lista_clipes, largura, altura):
+    """Sem transição — corte seco entre clipes (vídeo real já tem movimento próprio)."""
     clips_prontos = []
-    total = len(lista_clipes)
-
     for i, item in enumerate(lista_clipes):
         try:
-            clip = _preparar_clip_pexels(item, largura, altura)
-
-            duracao_transicao = min(0.4, item['duracao'] * 0.3)
-            if i > 0:
-                clip = aplicar_transicao_onda_calor(clip, duracao_transicao, aparecendo=True)
-            if i < total - 1:
-                clip = aplicar_transicao_onda_calor(clip, duracao_transicao, aparecendo=False)
-
-            clip = clip.set_start(item['inicio'])
-            clips_prontos.append(clip)
+            clips_prontos.append(_preparar_clip_pexels(item, largura, altura))
         except Exception as e:
             print(f"  ⚠️ Erro ao preparar clipe {i}: {e}")
-
     return clips_prontos
 
 
@@ -462,38 +486,45 @@ def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir=
     return CompositeAudioClip([audio_narracao, musica])
 
 
-def criar_video_curto(audio_path, lista_clipes, output_file, duracao_total):
-    """Vídeo vertical (short), sem intro."""
+def criar_video_curto(audio_path, lista_clipes, output_file, duracao_narracao):
+    """
+    Vertical (short). Estrutura de tempo:
+    [0s ───── música+vídeo ─────][3s narração começa ───...──][fim narração ── +5s música+vídeo][fade-out 2s]
+    """
     print("📹 Criando short (Pexels)...")
-    clips_prontos = _montar_clips_pexels(lista_clipes, 1080, 1920)
+    duracao_total = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
 
-    if not clips_prontos:
+    clips_video = _montar_clips_pexels(lista_clipes, 1080, 1920)
+    if not clips_video:
         return None
 
-    if clips_prontos:
-        ultimo = clips_prontos[-1]
-        cobertura = ultimo.start + ultimo.duration
-        if cobertura < duracao_total:
-            clips_prontos[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
+    ultimo = clips_video[-1]
+    cobertura = ultimo.start + ultimo.duration
+    if cobertura < duracao_total:
+        clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    video_base = CompositeVideoClip(clips_prontos, size=(1080, 1920)).set_duration(duracao_total)
+    clips_legenda = gerar_clips_legenda(audio_path, 1080, 1920, offset=SEGUNDOS_LEAD_IN)
 
-    audio_narr = AudioFileClip(audio_path)
+    video_base = CompositeVideoClip(clips_video + clips_legenda, size=(1080, 1920)).set_duration(duracao_total)
+    video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
+
+    audio_narr = AudioFileClip(audio_path).set_start(SEGUNDOS_LEAD_IN)
     audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
-    video_final = video_base.set_audio(audio_final)
+    audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
+    video_final = video_base.set_audio(audio_final)
     video_final.write_videofile(output_file, fps=30, codec='libx264', audio_codec='aac',
                                  preset='medium', bitrate='8000k', threads=4)
 
     video_final.close()
     audio_narr.close()
-    for c in clips_prontos:
+    for c in clips_video:
         c.close()
     return output_file
 
 
 def criar_video_longo(audio_path, lista_clipes, output_file, duracao_narracao):
-    """Vídeo horizontal (long), com intro fixa de assets/intro/."""
+    """Horizontal (long), com intro fixa de assets/intro/ antes do bloco lead-in/narração/tail."""
     print("📹 Criando vídeo longo (Pexels + intro)...")
 
     import glob
@@ -517,28 +548,32 @@ def criar_video_longo(audio_path, lista_clipes, output_file, duracao_narracao):
     else:
         print("  ℹ️ Nenhuma intro encontrada em assets/intro/ — seguindo sem intro")
 
-    clips_prontos = _montar_clips_pexels(lista_clipes, 1920, 1080)
-    # Desloca todos os clipes de conteúdo pra depois da intro
-    clips_deslocados = [c.set_start(c.start + intro_duracao) for c in clips_prontos]
+    duracao_bloco = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
+    duracao_total = intro_duracao + duracao_bloco
 
-    duracao_total = intro_duracao + duracao_narracao
+    clips_video = _montar_clips_pexels(lista_clipes, 1920, 1080)
+    clips_video = [c.set_start(c.start + intro_duracao) for c in clips_video]
 
-    if clips_deslocados:
-        ultimo = clips_deslocados[-1]
+    if clips_video:
+        ultimo = clips_video[-1]
         cobertura = ultimo.start + ultimo.duration
         if cobertura < duracao_total:
-            clips_deslocados[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
+            clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_deslocados
+    clips_legenda = gerar_clips_legenda(audio_path, 1920, 1080, offset=intro_duracao + SEGUNDOS_LEAD_IN)
+
+    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda
     if not todos_os_clips:
         return None
 
     video_base = CompositeVideoClip(todos_os_clips, size=(1920, 1080)).set_duration(duracao_total)
+    video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
 
-    audio_narr = AudioFileClip(audio_path).set_start(intro_duracao)
+    audio_narr = AudioFileClip(audio_path).set_start(intro_duracao + SEGUNDOS_LEAD_IN)
     audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
-    video_final = video_base.set_audio(audio_final)
+    audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
+    video_final = video_base.set_audio(audio_final)
     video_final.write_videofile(output_file, fps=24, codec='libx264', audio_codec='aac',
                                  preset='medium', bitrate='6000k', threads=4)
 
@@ -595,7 +630,9 @@ def main():
 
     termo = escolher_termo_pesquisa(tema, roteiro)
     orientacao = 'portrait' if VIDEO_TYPE == 'short' else 'landscape'
-    lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_narracao)
+
+    duracao_bloco_video = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
+    lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_bloco_video)
 
     if not lista_clipes:
         print("❌ Nenhum clipe baixado — abortando este ciclo.")
@@ -627,7 +664,7 @@ def main():
 
     descricao = roteiro[:300] + '...\n\n🔔 Inscreva-se para reflexões diárias!\n#' + \
                 ('shorts' if VIDEO_TYPE == 'short' else 'reflexao')
-    tags = config.get('tags_padrao', ['reflexao ccrista', 'motivacional', 'fe', 'inspiracao'])
+    tags = config.get('tags_padrao', ['reflexao crista', 'motivacional', 'fe', 'inspiracao'])
     if VIDEO_TYPE == 'short':
         tags.append('shorts')
 
