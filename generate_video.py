@@ -271,20 +271,30 @@ def _carregar_whisper():
     return _whisper_model
 
 
-def transcrever_com_timestamps(audio_path):
+def transcrever_palavras_com_timestamps(audio_path):
+    """
+    Transcreve com timestamp POR PALAVRA — mas usamos só o TEMPO de cada palavra,
+    nunca o texto que o Whisper reconheceu (que pode ter erros de reconhecimento/ortografia).
+    O texto exibido na legenda vem sempre do roteiro original do Gemini.
+    """
     whisper_model = _carregar_whisper()
-    segments, _info = whisper_model.transcribe(audio_path, language="pt", word_timestamps=False)
-    resultado = []
+    segments, _info = whisper_model.transcribe(audio_path, language="pt", word_timestamps=True)
+
+    palavras_tempo = []
     for seg in segments:
-        texto = seg.text.strip()
-        if texto:
-            resultado.append({'inicio': seg.start, 'fim': seg.end, 'texto': texto})
-    return resultado
+        if seg.words:
+            for w in seg.words:
+                palavras_tempo.append({'inicio': w.start, 'fim': w.end})
+    return palavras_tempo
 
 
-def gerar_clips_legenda(audio_path, largura, altura, offset=0.0):
+def gerar_clips_legenda(audio_path, roteiro, largura, altura, offset=0.0, palavras_por_bloco=7):
     """
     Gera os clipes de texto (legenda) centralizados, sincronizados com a narração.
+    O TEXTO vem do roteiro original (sempre correto); o TEMPO vem do Whisper (alinhamento).
+    As palavras do roteiro são pareadas em ordem com os timestamps detectados pelo Whisper —
+    pequena diferença na contagem de palavras é normal e não quebra o alinhamento, só desloca
+    ligeiramente o fim do vídeo (raramente perceptível).
     offset: quantos segundos a narração está deslocada no vídeo final (lead-in + intro, se houver).
     Se falhar por qualquer motivo (ex: ImageMagick ausente), retorna lista vazia — não derruba o vídeo.
     """
@@ -292,19 +302,38 @@ def gerar_clips_legenda(audio_path, largura, altura, offset=0.0):
         return []
 
     try:
-        segmentos = transcrever_com_timestamps(audio_path)
+        palavras_tempo = transcrever_palavras_com_timestamps(audio_path)
     except Exception as e:
         print(f"⚠️ Não foi possível transcrever para legenda: {e} — seguindo sem legenda")
         return []
+
+    if not palavras_tempo:
+        print("⚠️ Whisper não retornou timestamps de palavra — seguindo sem legenda")
+        return []
+
+    palavras_roteiro = roteiro.split()
+    n = min(len(palavras_roteiro), len(palavras_tempo))
+    if n == 0:
+        return []
+
+    if len(palavras_roteiro) != len(palavras_tempo):
+        print(f"  ℹ️ Roteiro tem {len(palavras_roteiro)} palavras, Whisper detectou {len(palavras_tempo)} "
+              f"marcações de tempo — alinhando pelas {n} em comum (diferença pequena é normal)")
 
     fontsize = max(28, int(largura / 18))
     largura_texto = int(largura * 0.85)
 
     clips = []
-    for seg in segmentos:
+    i = 0
+    while i < n:
+        fim_bloco = min(i + palavras_por_bloco, n)
+        texto_bloco = " ".join(palavras_roteiro[i:fim_bloco])
+        inicio_tempo = palavras_tempo[i]['inicio']
+        fim_tempo = palavras_tempo[fim_bloco - 1]['fim']
+
         try:
             txt_clip = TextClip(
-                seg['texto'],
+                texto_bloco,
                 fontsize=fontsize,
                 font=LEGENDA_FONTE,
                 color='white',
@@ -315,17 +344,18 @@ def gerar_clips_legenda(audio_path, largura, altura, offset=0.0):
                 align='center'
             )
             txt_clip = txt_clip.set_position(('center', 'center'))
-            txt_clip = txt_clip.set_start(offset + seg['inicio'])
-            txt_clip = txt_clip.set_duration(seg['fim'] - seg['inicio'])
+            txt_clip = txt_clip.set_start(offset + inicio_tempo)
+            txt_clip = txt_clip.set_duration(max(0.3, fim_tempo - inicio_tempo))
             clips.append(txt_clip)
         except Exception as e:
-            print(f"⚠️ Erro ao gerar legenda de um segmento: {e} — pulando esse trecho")
-            continue
+            print(f"⚠️ Erro ao gerar legenda de um bloco: {e} — pulando esse trecho")
+
+        i = fim_bloco
 
     if not clips:
         print("⚠️ Nenhuma legenda gerada (possível problema com ImageMagick) — vídeo seguirá sem legenda")
     else:
-        print(f"✅ {len(clips)} legenda(s) gerada(s)")
+        print(f"✅ {len(clips)} bloco(s) de legenda gerado(s), com texto do roteiro original")
 
     return clips
 
@@ -504,7 +534,7 @@ def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir=
     return CompositeAudioClip([audio_narracao, musica])
 
 
-def criar_video_curto(audio_path, lista_clipes, output_file, duracao_narracao):
+def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
     """
     Vertical (short). Estrutura de tempo:
     [0s ───── música+vídeo ─────][3s narração começa ───...──][fim narração ── +5s música+vídeo][fade-out 2s]
@@ -521,7 +551,7 @@ def criar_video_curto(audio_path, lista_clipes, output_file, duracao_narracao):
     if cobertura < duracao_total:
         clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    clips_legenda = gerar_clips_legenda(audio_path, 1080, 1920, offset=SEGUNDOS_LEAD_IN)
+    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1080, 1920, offset=SEGUNDOS_LEAD_IN)
 
     video_base = CompositeVideoClip(clips_video + clips_legenda, size=(1080, 1920)).set_duration(duracao_total)
     video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
@@ -541,7 +571,7 @@ def criar_video_curto(audio_path, lista_clipes, output_file, duracao_narracao):
     return output_file
 
 
-def criar_video_longo(audio_path, lista_clipes, output_file, duracao_narracao):
+def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
     """Horizontal (long), com intro fixa de assets/intro/ antes do bloco lead-in/narração/tail."""
     print("📹 Criando vídeo longo (Pexels + intro)...")
 
@@ -578,7 +608,7 @@ def criar_video_longo(audio_path, lista_clipes, output_file, duracao_narracao):
         if cobertura < duracao_total:
             clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    clips_legenda = gerar_clips_legenda(audio_path, 1920, 1080, offset=intro_duracao + SEGUNDOS_LEAD_IN)
+    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1920, 1080, offset=intro_duracao + SEGUNDOS_LEAD_IN)
 
     todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda
     if not todos_os_clips:
@@ -662,9 +692,9 @@ def main():
     print("🎥 Montando vídeo...")
     try:
         if VIDEO_TYPE == 'short':
-            resultado = criar_video_curto(audio_path, lista_clipes, video_path, duracao_narracao)
+            resultado = criar_video_curto(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
         else:
-            resultado = criar_video_longo(audio_path, lista_clipes, video_path, duracao_narracao)
+            resultado = criar_video_longo(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
 
         if not resultado:
             print("❌ Erro ao criar vídeo")
