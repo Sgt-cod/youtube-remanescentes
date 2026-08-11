@@ -66,6 +66,24 @@ LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', 'Liberation-Sans-Bold')
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
 
+
+def _gemini_generate(prompt, tentativas=3, espera=15):
+    """
+    Chama o Gemini com retry/backoff. Sem isso, qualquer instabilidade transitória da API
+    (ex: 504 DeadlineExceeded, 503 ServiceUnavailable, 429 rate limit) derruba o workflow
+    inteiro sem necessidade — geralmente uma segunda tentativa alguns segundos depois resolve.
+    """
+    ultimo_erro = None
+    for tentativa in range(1, tentativas + 1):
+        try:
+            return model.generate_content(prompt)
+        except Exception as e:
+            ultimo_erro = e
+            print(f"  ⚠️ Erro no Gemini (tentativa {tentativa}/{tentativas}): {e}")
+            if tentativa < tentativas:
+                time.sleep(espera * tentativa)  # backoff progressivo: 15s, 30s, ...
+    raise ultimo_erro
+
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
@@ -109,7 +127,7 @@ def escolher_tema_reflexao():
 que NÃO esteja nesta lista já usada: {sorted(usados)}
 
 Responda APENAS com o nome do tema, curto. Ex: "confiança em tempos de incerteza"."""
-    resposta = model.generate_content(prompt)
+    resposta = _gemini_generate(prompt)
     tema = resposta.text.strip().strip('"')
     print(f"💭 Tema (sugerido pelo Gemini): {tema}")
     return tema
@@ -121,7 +139,7 @@ para YouTube (estilo motivacional/inspiracional).
 
 Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
-    response = model.generate_content(prompt)
+    response = _gemini_generate(prompt)
     texto = response.text.strip().replace('```json', '').replace('```', '').strip()
     inicio = texto.find('{')
     fim = texto.rfind('}') + 1
@@ -158,7 +176,7 @@ REGRAS OBRIGATÓRIAS:
 
 Escreva APENAS o roteiro."""
 
-    response = model.generate_content(prompt)
+    response = _gemini_generate(prompt)
     texto = response.text
     texto = re.sub(r'\*+', '', texto)
     texto = re.sub(r'#+\s', '', texto)
@@ -329,7 +347,7 @@ o texto, sem aspas, sem explicação):
 
 {json.dumps(termos_validados, ensure_ascii=False)}"""
 
-    resposta = model.generate_content(prompt)
+    resposta = _gemini_generate(prompt)
     termo_escolhido = resposta.text.strip().strip('"').strip("'")
 
     if termo_escolhido not in termos_validados:
