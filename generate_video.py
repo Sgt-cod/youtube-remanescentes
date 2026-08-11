@@ -185,6 +185,35 @@ Escreva APENAS o roteiro."""
     return texto
 
 
+def revisar_roteiro(roteiro):
+    """
+    Segunda passada pelo Gemini, só pra revisão ortográfica/gramatical.
+    Ajuda a pegar palavras inventadas/mal formadas que o modelo eventualmente produz
+    (mais comum em conjugações verbais raras do português, ex: "formurmos" em vez de "formos").
+    Não muda sentido nem tom — só corrige erros de escrita.
+    Se falhar por qualquer motivo, devolve o roteiro original sem revisão (não quebra o vídeo).
+    """
+    prompt = f"""Revise o texto abaixo em português do Brasil. Corrija SOMENTE erros de ortografia,
+gramática, concordância ou palavras inexistentes/mal formadas (ex: conjugações verbais erradas).
+NÃO mude o sentido, o tom, nem reescreva frases que já estão corretas. Se não houver nenhum erro,
+devolva o texto exatamente como está, sem alterar nada.
+
+TEXTO:
+{roteiro}
+
+Retorne APENAS o texto revisado, sem comentários, sem aspas, sem explicações."""
+
+    try:
+        resposta = _gemini_generate(prompt)
+        texto_revisado = resposta.text.strip()
+        if texto_revisado:
+            return texto_revisado
+    except Exception as e:
+        print(f"⚠️ Revisão do roteiro falhou: {e} — usando versão original sem revisão")
+
+    return roteiro
+
+
 # ============================================================
 # ÁUDIO — Fish Audio (voz clonada) com fallback para Edge TTS
 # ============================================================
@@ -667,6 +696,8 @@ def main():
 
     print("✍️ Gerando roteiro...")
     roteiro = gerar_roteiro(tema, VIDEO_TYPE)
+    print("🔍 Revisando roteiro (ortografia/gramática)...")
+    roteiro = revisar_roteiro(roteiro)
 
     audio_path = f'{ASSETS_DIR}/audio.mp3'
     criar_audio(roteiro, audio_path)
