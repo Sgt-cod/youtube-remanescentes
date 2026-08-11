@@ -28,6 +28,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ffmpeg imagemagick
 
+      - name: Liberar política do ImageMagick (necessário para legendas)
+        run: |
+          POLICY_FILE="/etc/ImageMagick-6/policy.xml"
+          if [ -f "$POLICY_FILE" ]; then
+            sudo sed -i 's/rights="none"/rights="read|write"/g' "$POLICY_FILE"
+            sudo sed -i '/pattern="@\*"/d' "$POLICY_FILE"
+          fi
+
       - name: Instalar dependências Python
         run: |
           pip install --upgrade pip
@@ -54,12 +62,11 @@ jobs:
         run: |
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
-          git fetch origin main
-          git checkout main
-          git pull origin main --rebase
           touch videos_gerados.json temas_usados.json
           git add -f videos_gerados.json temas_usados.json
           git diff --staged --quiet || git commit -m "🎬 Novo vídeo longo gerado - $(date +'%Y-%m-%d')"
+          git fetch origin main
+          git pull origin main --rebase
           git push origin main || git push --force-with-lease origin main
 
       - name: Upload vídeo como artefato
