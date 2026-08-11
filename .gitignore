@@ -1,0 +1,6 @@
+videos/*.mp4
+assets/pexels/*.mp4
+assets/audio.mp3
+__pycache__/
+*.pyc
+.env
