@@ -218,7 +218,8 @@ Retorne APENAS o texto revisado, sem comentários, sem aspas, sem explicações.
 # ÁUDIO — Fish Audio (voz clonada) com fallback para Edge TTS
 # ============================================================
 
-def criar_audio_fishaudio(texto, output_file):
+def _chamada_crua_fishaudio(texto, output_file):
+    """Uma única chamada à API da Fish Audio, sem chunking — usada internamente por trecho."""
     if not FISHAUDIO_API_KEY:
         raise Exception("FISHAUDIO_API_KEY não configurada")
 
@@ -237,6 +238,71 @@ def criar_audio_fishaudio(texto, output_file):
 
     if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
         raise Exception("Arquivo de áudio vazio retornado pela Fish Audio")
+
+
+def _dividir_em_frases(texto):
+    """Divide o roteiro em frases (por pontuação), pra gerar áudio em trechos menores."""
+    frases = re.split(r'(?<=[.!?])\s+', texto.strip())
+    return [f.strip() for f in frases if f.strip()]
+
+
+def _estimar_duracao_esperada(texto, palavras_por_segundo=2.2):
+    """Estimativa conservadora (fala mais devagar que a média) só pra servir de teto de sanidade."""
+    n_palavras = len(texto.split())
+    return max(n_palavras / palavras_por_segundo, 1.0)
+
+
+def criar_audio_fishaudio(texto, output_file):
+    """
+    Gera a narração completa via Fish Audio, DIVIDINDO O ROTEIRO EM FRASES em vez de mandar
+    tudo de uma vez. TTS neurais (incluindo clonagem de voz) são bem mais instáveis em textos
+    longos — o modelo pode "alucinar" e inserir um trecho em outro idioma ou repetir algo que não
+    estava no texto. Textos curtos (frase a frase) reduzem bastante esse risco.
+
+    Cada frase tem a duração do áudio conferida contra uma estimativa esperada; se sair muito mais
+    longa que o esperado, é sinal de alucinação e o trecho é regerado automaticamente.
+    """
+    frases = _dividir_em_frases(texto)
+    print(f"  🔊 Gerando narração em {len(frases)} trecho(s) (Fish Audio)...")
+
+    pasta_trechos = f'{ASSETS_DIR}/audio_trechos'
+    os.makedirs(pasta_trechos, exist_ok=True)
+    caminhos_trechos = []
+
+    for i, frase in enumerate(frases):
+        duracao_esperada = _estimar_duracao_esperada(frase)
+        limite_max = max(duracao_esperada * 2.5, duracao_esperada + 4)  # margem generosa
+
+        trecho_path = f'{pasta_trechos}/trecho_{i:03d}.mp3'
+        duracao_real = None
+
+        for tentativa in range(2):
+            _chamada_crua_fishaudio(frase, trecho_path)
+            clip_temp = AudioFileClip(trecho_path)
+            duracao_real = clip_temp.duration
+            clip_temp.close()
+
+            if duracao_real <= limite_max:
+                break
+            print(f"  ⚠️ Trecho {i + 1}/{len(frases)} saiu com {duracao_real:.1f}s "
+                  f"(esperado ~{duracao_esperada:.1f}s) — possível alucinação do TTS, "
+                  f"tentando de novo...")
+        else:
+            print(f"  ⚠️ Trecho {i + 1} ainda suspeito após retry — mantendo mesmo assim "
+                  f"(sem alternativa gratuita melhor no momento)")
+
+        caminhos_trechos.append(trecho_path)
+
+    print("  🔗 Concatenando trechos em áudio final...")
+    clips_audio = [AudioFileClip(p) for p in caminhos_trechos]
+    audio_final = concatenate_audioclips(clips_audio)
+    audio_final.write_audiofile(output_file, logger=None)
+    for c in clips_audio:
+        c.close()
+    audio_final.close()
+
+    if not os.path.exists(output_file) or os.path.getsize(output_file) == 0:
+        raise Exception("Falha ao montar áudio final a partir dos trechos")
 
 
 async def criar_audio_edge_async(texto, output_file):
