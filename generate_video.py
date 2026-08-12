@@ -7,6 +7,7 @@ import time
 from datetime import datetime
 import requests
 import edge_tts
+from PIL import Image, ImageDraw, ImageFont
 from moviepy.editor import *
 from google import generativeai as genai
 from google.oauth2.credentials import Credentials
@@ -244,6 +245,35 @@ def _dividir_em_frases(texto):
     """Divide o roteiro em frases (por pontuação), pra gerar áudio em trechos menores."""
     frases = re.split(r'(?<=[.!?])\s+', texto.strip())
     return [f.strip() for f in frases if f.strip()]
+
+
+def aplicar_correcoes_pronuncia(texto):
+    """
+    Troca palavras conhecidas por má pronúncia da voz clonada (ex: "fascinante" -> "fassinante")
+    por uma grafia mais fácil pro TTS, SEM alterar a contagem de palavras — cada palavra errada
+    vira exatamente uma palavra de substituição. Isso é o que garante que a legenda (que usa o
+    texto original correto) continue alinhada com o áudio (que usa o texto "fonético").
+    Lista curada em config.json -> "correcoes_pronuncia" (chave = palavra correta, minúscula).
+    """
+    correcoes = config.get('correcoes_pronuncia', {})
+    if not correcoes:
+        return texto
+
+    def substituir(match):
+        palavra_original = match.group(0)
+        palavra_lower = palavra_original.lower()
+        if palavra_lower not in correcoes:
+            return palavra_original
+        substituta = correcoes[palavra_lower]
+        # Preserva capitalização simples (inicial maiúscula ou tudo maiúsculo)
+        if palavra_original.isupper():
+            return substituta.upper()
+        if palavra_original[0].isupper():
+            return substituta.capitalize()
+        return substituta
+
+    padrao = r'\b(' + '|'.join(re.escape(p) for p in correcoes.keys()) + r')\b'
+    return re.sub(padrao, substituir, texto, flags=re.IGNORECASE)
 
 
 def _estimar_duracao_esperada(texto, palavras_por_segundo=2.2):
@@ -727,6 +757,111 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
     return output_file
 
 
+_FONTE_TTF_CANDIDATOS = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
+
+
+def _carregar_fonte_pil(tamanho):
+    for caminho in _FONTE_TTF_CANDIDATOS:
+        if os.path.exists(caminho):
+            return ImageFont.truetype(caminho, tamanho)
+    print("  ⚠️ Nenhuma fonte TTF encontrada — usando fonte padrão do PIL (qualidade menor)")
+    return ImageFont.load_default()
+
+
+def pesquisar_foto_pexels(termo):
+    """Busca fotos (não vídeos) no Pexels — usada só para a thumbnail."""
+    headers = {"Authorization": PEXELS_API_KEY}
+    params = {"query": termo, "orientation": "landscape", "per_page": 15}
+    resp = requests.get("https://api.pexels.com/v1/search", headers=headers, params=params, timeout=30)
+    resp.raise_for_status()
+    return resp.json().get('photos', [])
+
+
+def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
+    """
+    Thumbnail padrão: foto 16:9 do Pexels + faixa preta no topo (1/5 da altura) com o título
+    em duas cores por cima. Se qualquer etapa falhar, retorna None — o vídeo publica normalmente,
+    só sem thumbnail customizada (o YouTube usa uma automática).
+    """
+    try:
+        fotos = pesquisar_foto_pexels(termo)
+        if not fotos:
+            print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
+            return None
+
+        foto = random.choice(fotos[:5])
+        src = foto.get('src', {})
+        url_imagem = src.get('landscape') or src.get('large') or src.get('original')
+        if not url_imagem:
+            return None
+
+        resp = requests.get(url_imagem, timeout=30)
+        resp.raise_for_status()
+
+        caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
+        with open(caminho_bruto, 'wb') as f:
+            f.write(resp.content)
+
+        img = Image.open(caminho_bruto).convert('RGB')
+
+        # Corta pra 16:9 exato (cobrindo o quadro, sem distorcer)
+        alvo_ratio = largura / altura
+        img_ratio = img.width / img.height
+        if img_ratio > alvo_ratio:
+            novo_w = int(img.height * alvo_ratio)
+            corte = (img.width - novo_w) // 2
+            img = img.crop((corte, 0, corte + novo_w, img.height))
+        else:
+            novo_h = int(img.width / alvo_ratio)
+            corte = (img.height - novo_h) // 2
+            img = img.crop((0, corte, img.width, corte + novo_h))
+        img = img.resize((largura, altura))
+
+        draw = ImageDraw.Draw(img)
+        altura_faixa = int(altura / 5)
+        draw.rectangle([(0, 0), (largura, altura_faixa)], fill=(0, 0, 0))
+
+        # Título em 2 cores (metade dourado, metade branco) — dá destaque sem precisar de imagem extra
+        palavras = titulo.split()
+        meio = max(1, len(palavras) // 2)
+        parte1 = " ".join(palavras[:meio])
+        parte2 = " ".join(palavras[meio:])
+
+        fonte = _carregar_fonte_pil(int(altura_faixa * 0.42))
+        bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
+        bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
+        largura1 = bbox1[2] - bbox1[0]
+        largura2 = bbox2[2] - bbox2[0]
+        espaco = 20
+
+        if largura1 + espaco + largura2 <= largura * 0.92:
+            # Cabe lado a lado numa linha só
+            x = (largura - (largura1 + espaco + largura2)) // 2
+            y = (altura_faixa - (bbox1[3] - bbox1[1])) // 2
+            draw.text((x, y), parte1, font=fonte, fill=(255, 215, 0))
+            draw.text((x + largura1 + espaco, y), parte2, font=fonte, fill=(255, 255, 255))
+        else:
+            # Não coube — empilha em 2 linhas com fonte um pouco menor
+            fonte = _carregar_fonte_pil(int(altura_faixa * 0.30))
+            bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
+            bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
+            y1 = int(altura_faixa * 0.06)
+            y2 = int(altura_faixa * 0.52)
+            draw.text(((largura - (bbox1[2] - bbox1[0])) // 2, y1), parte1, font=fonte, fill=(255, 215, 0))
+            draw.text(((largura - (bbox2[2] - bbox2[0])) // 2, y2), parte2, font=fonte, fill=(255, 255, 255))
+
+        img.save(output_path, quality=90)
+        print(f"  ✅ Thumbnail gerada: {output_path}")
+        return output_path
+
+    except Exception as e:
+        print(f"  ⚠️ Erro ao gerar thumbnail: {e} — publicando sem thumbnail customizada")
+        return None
+
+
 def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=None):
     creds_dict = json.loads(YOUTUBE_CREDENTIALS)
     credentials = Credentials.from_authorized_user_info(creds_dict)
@@ -766,7 +901,8 @@ def main():
     roteiro = revisar_roteiro(roteiro)
 
     audio_path = f'{ASSETS_DIR}/audio.mp3'
-    criar_audio(roteiro, audio_path)
+    texto_falado = aplicar_correcoes_pronuncia(roteiro)
+    criar_audio(texto_falado, audio_path)
 
     audio_clip = AudioFileClip(audio_path)
     duracao_narracao = audio_clip.duration
@@ -824,7 +960,10 @@ def main():
 
     print("\n📤 Upload YouTube...")
     try:
-        video_id = fazer_upload_youtube(video_path, titulo, descricao, tags)
+        print("🖼️ Gerando thumbnail...")
+        thumbnail_path = gerar_thumbnail(titulo_video, termo, f'{ASSETS_DIR}/thumbnail.jpg')
+
+        video_id = fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path)
         url = f'https://youtube.com/{"shorts/" if VIDEO_TYPE == "short" else "watch?v="}{video_id}'
         print(f"✅ Publicado!\n🔗 {url}")
 
