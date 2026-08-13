@@ -780,6 +780,41 @@ def pesquisar_foto_pexels(termo):
     return resp.json().get('photos', [])
 
 
+def gerar_texto_thumbnail(titulo, tema):
+    """
+    Gera um texto curto e impactante pra thumbnail (2-4 palavras), no estilo de canais
+    motivacionais virais — não é o título do vídeo, é um resumo/gancho ainda mais direto.
+    Se falhar, usa as 3 primeiras palavras do título como texto de segurança.
+    """
+    prompt = f"""Baseado neste vídeo de reflexão cristã/motivacional, crie um texto CURTO para
+thumbnail de YouTube, no estilo de canais motivacionais virais.
+
+Exemplos do estilo desejado: "Nunca se defenda", "Inteligência sombria", "Venda-se mais caro",
+"Confiança sombria", "O mapa do inconsciente", "Nunca se explique".
+
+TEMA: {tema}
+TÍTULO DO VÍDEO: {titulo}
+
+REGRAS OBRIGATÓRIAS:
+- Entre 2 e 4 palavras, NUNCA mais que isso
+- Impactante, intrigante, desperta curiosidade — não é uma frase explicativa
+- Pode ser imperativo curto ("Nunca se explique") ou substantivo+adjetivo ("Confiança sombria")
+- É um resumo/gancho, NÃO é o título do vídeo reescrito
+- Sem ponto final, sem aspas
+
+Retorne APENAS o texto da thumbnail, nada mais."""
+
+    try:
+        resposta = _gemini_generate(prompt)
+        texto = resposta.text.strip().strip('"').strip("'")
+        if texto and len(texto.split()) <= 6:
+            return texto
+    except Exception as e:
+        print(f"  ⚠️ Erro ao gerar texto da thumbnail: {e}")
+
+    return " ".join(titulo.split()[:3])
+
+
 def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
     """
     Thumbnail padrão: foto 16:9 do Pexels + faixa preta no topo (1/5 da altura) com o título
@@ -824,20 +859,28 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
         altura_faixa = int(altura / 5)
         draw.rectangle([(0, 0), (largura, altura_faixa)], fill=(0, 0, 0))
 
-        # Título em 2 cores (metade dourado, metade branco) — dá destaque sem precisar de imagem extra
+        # Texto curto em 2 cores (dourado + branco) — dá destaque sem precisar de imagem extra
         palavras = titulo.split()
         meio = max(1, len(palavras) // 2)
         parte1 = " ".join(palavras[:meio])
         parte2 = " ".join(palavras[meio:])
 
-        fonte = _carregar_fonte_pil(int(altura_faixa * 0.42))
-        bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
-        bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
-        largura1 = bbox1[2] - bbox1[0]
-        largura2 = bbox2[2] - bbox2[0]
-        espaco = 20
+        # Como o texto agora é curto (2-4 palavras), começa BEM grande e só reduz se não couber
+        tamanho_fonte = int(altura_faixa * 0.78)
+        tamanho_minimo = int(altura_faixa * 0.30)
+        espaco = 24
 
-        if largura1 + espaco + largura2 <= largura * 0.92:
+        while tamanho_fonte >= tamanho_minimo:
+            fonte = _carregar_fonte_pil(tamanho_fonte)
+            bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
+            bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
+            largura1 = bbox1[2] - bbox1[0]
+            largura2 = bbox2[2] - bbox2[0]
+            if largura1 + espaco + largura2 <= largura * 0.94:
+                break
+            tamanho_fonte = int(tamanho_fonte * 0.9)
+
+        if largura1 + espaco + largura2 <= largura * 0.94:
             # Cabe lado a lado numa linha só
             x = (largura - (largura1 + espaco + largura2)) // 2
             y = (altura_faixa - (bbox1[3] - bbox1[1])) // 2
