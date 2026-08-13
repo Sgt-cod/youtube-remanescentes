@@ -782,37 +782,48 @@ def pesquisar_foto_pexels(termo):
 
 def gerar_texto_thumbnail(titulo, tema):
     """
-    Gera um texto curto e impactante pra thumbnail (2-4 palavras), no estilo de canais
-    motivacionais virais — não é o título do vídeo, é um resumo/gancho ainda mais direto.
+    Gera um texto curto e impactante pra thumbnail (em MAIÚSCULAS), no estilo de canais
+    motivacionais virais — não é o título do vídeo, é um resumo/gancho ainda mais direto,
+    normalmente contrastando as duas ideias centrais do título.
     Se falhar, usa as 3 primeiras palavras do título como texto de segurança.
     """
     prompt = f"""Baseado neste vídeo de reflexão cristã/motivacional, crie um texto CURTO para
-thumbnail de YouTube, no estilo de canais motivacionais virais.
+thumbnail de YouTube, em MAIÚSCULAS, no estilo de canais motivacionais virais.
 
-Exemplos do estilo desejado: "Nunca se defenda", "Inteligência sombria", "Venda-se mais caro",
-"Confiança sombria", "O mapa do inconsciente", "Nunca se explique".
+Exemplos de título -> texto de thumbnail (siga esse padrão de brevidade e contraste):
+"E se você parasse de se preocupar com o amanhã? Descubra a paz que restaura a alma"
+-> "PAZ NA ALMA OU PREOCUPAÇÕES?"
+
+"Uma nova chance toda manhã: A bondade de Deus em sua vida"
+-> "UMA NOVA CHANCE OU A BONDADE DE DEUS"
+
+Outros exemplos do estilo geral (nem sempre com "OU"): "NUNCA SE DEFENDA", "INTELIGÊNCIA SOMBRIA",
+"CONFIANÇA SOMBRIA", "NUNCA SE EXPLIQUE".
 
 TEMA: {tema}
 TÍTULO DO VÍDEO: {titulo}
 
 REGRAS OBRIGATÓRIAS:
-- Entre 2 e 4 palavras, NUNCA mais que isso
+- TODO EM MAIÚSCULAS
+- No máximo 6 palavras no total
+- Quando o título tiver duas ideias/partes claras, contraste-as ligando com "OU" (como nos 2
+  primeiros exemplos). Quando o título for uma ideia só, use uma frase-gancho curta e direta
+  (como nos outros exemplos)
 - Impactante, intrigante, desperta curiosidade — não é uma frase explicativa
-- Pode ser imperativo curto ("Nunca se explique") ou substantivo+adjetivo ("Confiança sombria")
 - É um resumo/gancho, NÃO é o título do vídeo reescrito
-- Sem ponto final, sem aspas
+- Sem ponto final (pode ter "?"), sem aspas
 
 Retorne APENAS o texto da thumbnail, nada mais."""
 
     try:
         resposta = _gemini_generate(prompt)
-        texto = resposta.text.strip().strip('"').strip("'")
-        if texto and len(texto.split()) <= 6:
+        texto = resposta.text.strip().strip('"').strip("'").upper()
+        if texto and len(texto.split()) <= 7:
             return texto
     except Exception as e:
         print(f"  ⚠️ Erro ao gerar texto da thumbnail: {e}")
 
-    return " ".join(titulo.split()[:3])
+    return " ".join(titulo.split()[:3]).upper()
 
 
 def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
@@ -1004,7 +1015,9 @@ def main():
     print("\n📤 Upload YouTube...")
     try:
         print("🖼️ Gerando thumbnail...")
-        thumbnail_path = gerar_thumbnail(titulo_video, termo, f'{ASSETS_DIR}/thumbnail.jpg')
+        texto_thumb = gerar_texto_thumbnail(titulo_video, tema)
+        print(f"   Texto da thumb: {texto_thumb}")
+        thumbnail_path = gerar_thumbnail(texto_thumb, termo, f'{ASSETS_DIR}/thumbnail.jpg')
 
         video_id = fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path)
         url = f'https://youtube.com/{"shorts/" if VIDEO_TYPE == "short" else "watch?v="}{video_id}'
