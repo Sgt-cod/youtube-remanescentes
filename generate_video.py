@@ -531,22 +531,64 @@ def pesquisar_videos_pexels(termo, orientacao, pagina=1, por_pagina=40):
     return resp.json().get('videos', [])
 
 
+PEXELS_LOG_FILE = 'pexels_usados.json'
+DIAS_EVITAR_REPETICAO_PEXELS = int(os.environ.get('DIAS_EVITAR_REPETICAO_PEXELS', '20'))
+
+
+def _carregar_pexels_usados_recentes():
+    """Retorna o set de IDs de vídeo do Pexels usados nos últimos N dias (evita repetir entre publicações)."""
+    if not os.path.exists(PEXELS_LOG_FILE):
+        return set()
+    try:
+        with open(PEXELS_LOG_FILE, 'r', encoding='utf-8') as f:
+            registros = json.load(f)
+    except Exception:
+        return set()
+
+    limite = datetime.now().timestamp() - (DIAS_EVITAR_REPETICAO_PEXELS * 86400)
+    return {r['id'] for r in registros if r.get('data', 0) >= limite}
+
+
+def _salvar_pexels_usado(video_id):
+    """Adiciona um vídeo ao histórico, descartando registros mais antigos que a janela de dias."""
+    registros = []
+    if os.path.exists(PEXELS_LOG_FILE):
+        try:
+            with open(PEXELS_LOG_FILE, 'r', encoding='utf-8') as f:
+                registros = json.load(f)
+        except Exception:
+            registros = []
+
+    agora = datetime.now().timestamp()
+    limite = agora - (DIAS_EVITAR_REPETICAO_PEXELS * 86400)
+    registros = [r for r in registros if r.get('data', 0) >= limite]
+    registros.append({'id': video_id, 'data': agora})
+
+    with open(PEXELS_LOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(registros, f, indent=2, ensure_ascii=False)
+
+
 def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
     """
     Baixa vídeos do Pexels sequencialmente até cobrir duracao_alvo (segundos).
     Cada clipe usa no máximo DURACAO_MAXIMA_CLIPE segundos (mesmo que o vídeo fonte seja mais longo),
     o que aumenta a variedade de cortes e reduz a duração de cada vídeo repetido entre shorts.
-    Nunca repete o mesmo vídeo dentro do mesmo short (usados_ids é local a esta chamada).
+    Nunca repete o mesmo vídeo dentro do mesmo short (usados_ids é local a esta chamada), e evita
+    reusar vídeos já usados nos últimos DIAS_EVITAR_REPETICAO_PEXELS dias (histórico persistido).
     Busca páginas adicionais automaticamente se a primeira não tiver candidatos suficientes.
     """
     largura_alvo = 1080 if orientacao == 'portrait' else 1920
     os.makedirs(f'{ASSETS_DIR}/pexels', exist_ok=True)
 
+    usados_recentemente = _carregar_pexels_usados_recentes()
+    print(f"  📋 {len(usados_recentemente)} vídeo(s) no histórico dos últimos "
+          f"{DIAS_EVITAR_REPETICAO_PEXELS} dias (serão evitados)")
+
     clipes = []
     tempo_coberto = 0.0
     usados_ids = set()
     pagina = 1
-    MAX_PAGINAS = 5
+    MAX_PAGINAS = 8  # aumentado: com o histórico filtrando candidatos, pode precisar de mais páginas
 
     while tempo_coberto < duracao_alvo and pagina <= MAX_PAGINAS:
         if LIMITE_CLIPES_TESTE > 0 and len(clipes) >= LIMITE_CLIPES_TESTE:
@@ -568,6 +610,8 @@ def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
 
             video_id = video.get('id')
             if video_id in usados_ids:
+                continue
+            if video_id in usados_recentemente:
                 continue
             usados_ids.add(video_id)
 
@@ -592,6 +636,7 @@ def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
 
             clipes.append({'path': destino, 'inicio': offset_inicio + tempo_coberto, 'duracao': duracao_uso})
             tempo_coberto += duracao_uso
+            _salvar_pexels_usado(video_id)
 
         pagina += 1
 
@@ -783,32 +828,29 @@ def pesquisar_foto_pexels(termo):
 def gerar_texto_thumbnail(titulo, tema):
     """
     Gera um texto curto e impactante pra thumbnail (em MAIÚSCULAS), no estilo de canais
-    motivacionais virais — não é o título do vídeo, é um resumo/gancho ainda mais direto,
-    normalmente contrastando as duas ideias centrais do título.
+    motivacionais virais — um resumo/gancho direto do título, não o título reescrito.
     Se falhar, usa as 3 primeiras palavras do título como texto de segurança.
     """
     prompt = f"""Baseado neste vídeo de reflexão cristã/motivacional, crie um texto CURTO para
 thumbnail de YouTube, em MAIÚSCULAS, no estilo de canais motivacionais virais.
 
-Exemplos de título -> texto de thumbnail (siga esse padrão de brevidade e contraste):
+Exemplos de título -> possíveis textos de thumbnail (escolha UMA ideia central, não junte as duas):
 "E se você parasse de se preocupar com o amanhã? Descubra a paz que restaura a alma"
--> "PAZ NA ALMA OU PREOCUPAÇÕES?"
+-> "PAZ NA ALMA"  (ou, alternativamente: "PREOCUPAÇÕES?")
 
 "Uma nova chance toda manhã: A bondade de Deus em sua vida"
--> "UMA NOVA CHANCE OU A BONDADE DE DEUS"
+-> "UMA NOVA CHANCE"  (ou, alternativamente: "A BONDADE DE DEUS")
 
-Outros exemplos do estilo geral (nem sempre com "OU"): "NUNCA SE DEFENDA", "INTELIGÊNCIA SOMBRIA",
-"CONFIANÇA SOMBRIA", "NUNCA SE EXPLIQUE".
+Outros exemplos do estilo geral: "NUNCA SE DEFENDA", "INTELIGÊNCIA SOMBRIA", "CONFIANÇA SOMBRIA",
+"NUNCA SE EXPLIQUE".
 
 TEMA: {tema}
 TÍTULO DO VÍDEO: {titulo}
 
 REGRAS OBRIGATÓRIAS:
 - TODO EM MAIÚSCULAS
-- No máximo 6 palavras no total
-- Quando o título tiver duas ideias/partes claras, contraste-as ligando com "OU" (como nos 2
-  primeiros exemplos). Quando o título for uma ideia só, use uma frase-gancho curta e direta
-  (como nos outros exemplos)
+- Entre 2 e 4 palavras — NUNCA junte duas ideias diferentes na mesma frase
+- Escolha a ideia/palavra mais forte e impactante do título, não tente resumir tudo
 - Impactante, intrigante, desperta curiosidade — não é uma frase explicativa
 - É um resumo/gancho, NÃO é o título do vídeo reescrito
 - Sem ponto final (pode ter "?"), sem aspas
@@ -818,7 +860,7 @@ Retorne APENAS o texto da thumbnail, nada mais."""
     try:
         resposta = _gemini_generate(prompt)
         texto = resposta.text.strip().strip('"').strip("'").upper()
-        if texto and len(texto.split()) <= 7:
+        if texto and len(texto.split()) <= 5:
             return texto
     except Exception as e:
         print(f"  ⚠️ Erro ao gerar texto da thumbnail: {e}")
