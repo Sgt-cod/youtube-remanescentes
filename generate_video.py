@@ -1017,6 +1017,7 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
 
 def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=None):
     creds_dict = json.loads(YOUTUBE_CREDENTIALS)
+    print(f"CLIENT_ID em uso (YouTube): {creds_dict.get('client_id')}")  # <- linha temporária
     credentials = Credentials.from_authorized_user_info(creds_dict)
     youtube = build('youtube', 'v3', credentials=credentials)
 
