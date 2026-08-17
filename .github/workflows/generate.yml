@@ -48,6 +48,7 @@ jobs:
           YOUTUBE_CREDENTIALS: ${{ secrets.YOUTUBE_CREDENTIALS }}
           FISHAUDIO_API_KEY: ${{ secrets.FISHAUDIO_API_KEY }}
           FISHAUDIO_VOICE_ID: ${{ secrets.FISHAUDIO_VOICE_ID }}
+          AGNES_API_KEY: ${{ secrets.AGNES_API_KEY }}
           USAR_CURACAO: "false"
           VIDEO_TYPE: long
           # ── Descomente pra testar sem publicar / mais rápido ──────────────
