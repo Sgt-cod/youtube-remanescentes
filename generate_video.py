@@ -33,6 +33,14 @@ GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
 YOUTUBE_CREDENTIALS = os.environ.get('YOUTUBE_CREDENTIALS')
 PEXELS_API_KEY = os.environ.get('PEXELS_API_KEY')
 
+# ── Agnes AI (geração de imagem gratuita, para thumbnail) ───────────────────
+# ⚠️ Serviço de terceiro relativamente novo (2026) — sem o histórico de estabilidade do
+# Pexels. Por isso é usado como PRIMEIRA opção com fallback automático pro Pexels, não como
+# única fonte.
+AGNES_API_KEY = os.environ.get('AGNES_API_KEY')
+AGNES_IMAGE_MODEL = os.environ.get('AGNES_IMAGE_MODEL', 'agnes-image-2.1-flash')
+AGNES_URL = "https://apihub.agnes-ai.com/v1/images/generations"
+
 # ── Fish Audio (voz) ─────────────────────────────────────────────────────────
 FISHAUDIO_API_KEY = os.environ.get('FISHAUDIO_API_KEY')
 FISHAUDIO_VOICE_ID = os.environ.get('FISHAUDIO_VOICE_ID')
@@ -88,6 +96,12 @@ def _gemini_generate(prompt, tentativas=3, espera=15):
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
+# Idioma do conteúdo gerado (roteiro, título, thumbnail) — mude só isso no config.json
+# pra clonar o canal em outro idioma, sem tocar no código.
+IDIOMA_CONTEUDO = config.get('idioma_conteudo', 'português do Brasil')
+CONTEXTO_NICHO = config.get('contexto_nicho', 'reflexão cristã/motivacional')
+INSTRUCAO_EXTRA_ROTEIRO = config.get('instrucao_extra_roteiro', '')
+
 
 # ============================================================
 # TEMA DO DIA — rotação sem repetição
@@ -124,10 +138,10 @@ def escolher_tema_reflexao():
         return tema
 
     print("💭 Lista de temas esgotada — pedindo sugestão ao Gemini...")
-    prompt = f"""Sugira UM tema de reflexão cristã/motivacional (ex: gratidão, perdão, esperança),
-que NÃO esteja nesta lista já usada: {sorted(usados)}
+    prompt = f"""Sugira UM tema de {CONTEXTO_NICHO} (ex: gratidão, perdão, esperança, disciplina,
+superação), que NÃO esteja nesta lista já usada: {sorted(usados)}
 
-Responda APENAS com o nome do tema, curto. Ex: "confiança em tempos de incerteza"."""
+Responda em {IDIOMA_CONTEUDO}, APENAS com o nome do tema, curto."""
     resposta = _gemini_generate(prompt)
     tema = resposta.text.strip().strip('"')
     print(f"💭 Tema (sugerido pelo Gemini): {tema}")
@@ -135,8 +149,8 @@ Responda APENAS com o nome do tema, curto. Ex: "confiança em tempos de incertez
 
 
 def gerar_titulo(tema):
-    prompt = f"""Baseado no tema de reflexão cristã "{tema}", crie um título de vídeo curto e chamativo
-para YouTube (estilo motivacional/inspiracional).
+    prompt = f"""Baseado no tema de {CONTEXTO_NICHO} "{tema}", crie um título de vídeo curto e
+chamativo para YouTube (estilo motivacional/inspiracional), em {IDIOMA_CONTEUDO}.
 
 Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
@@ -161,16 +175,16 @@ def gerar_roteiro(tema, tipo_video):
         palavras_alvo = 650
         duracao_desc = '4-5 minutos'
 
-    prompt = f"""Crie um roteiro de narração para um vídeo de reflexão cristã/motivacional sobre o tema:
+    linha_extra = f"\n- {INSTRUCAO_EXTRA_ROTEIRO}" if INSTRUCAO_EXTRA_ROTEIRO else ""
+
+    prompt = f"""Crie um roteiro de narração para um vídeo de {CONTEXTO_NICHO} sobre o tema:
 "{tema}"
 
 REGRAS OBRIGATÓRIAS:
+- Escreva em {IDIOMA_CONTEUDO}
 - Duração alvo: {duracao_desc} de narração (~{palavras_alvo} palavras)
-- Tom acolhedor, reflexivo, encorajador — como uma conversa sincera, não um sermão formal
-- Pode referenciar ensinamentos ou princípios bíblicos relacionados ao tema, mas NUNCA cite passagens
-  bíblicas literalmente/palavra por palavra — parafraseie a ideia ou mencione a referência (livro/capítulo)
-  sem transcrever o texto integral, por respeito a direitos autorais de traduções específicas
-- Termine com uma mensagem de esperança/encorajamento prática para o dia a dia
+- Tom acolhedor, reflexivo, encorajador — como uma conversa sincera, não um sermão/palestra formal
+- Termine com uma mensagem de esperança/encorajamento prática para o dia a dia{linha_extra}
 - NÃO mencione apresentador, elementos visuais ou câmera
 - Texto corrido, pronto para narração
 - SEM formatação, asteriscos, marcadores ou emojis
@@ -194,7 +208,7 @@ def revisar_roteiro(roteiro):
     Não muda sentido nem tom — só corrige erros de escrita.
     Se falhar por qualquer motivo, devolve o roteiro original sem revisão (não quebra o vídeo).
     """
-    prompt = f"""Revise o texto abaixo em português do Brasil. Corrija SOMENTE erros de ortografia,
+    prompt = f"""Revise o texto abaixo em {IDIOMA_CONTEUDO}. Corrija SOMENTE erros de ortografia,
 gramática, concordância ou palavras inexistentes/mal formadas (ex: conjugações verbais erradas).
 NÃO mude o sentido, o tom, nem reescreva frases que já estão corretas. Se não houver nenhum erro,
 devolva o texto exatamente como está, sem alterar nada.
@@ -373,7 +387,8 @@ def criar_audio(texto, output_file):
     except Exception as e:
         print(f"❌ Edge TTS: {e}")
         from gtts import gTTS
-        tts = gTTS(text=texto, lang='pt-br', slow=False)
+        idioma_gtts = config.get('idioma_gtts', 'pt-br')
+        tts = gTTS(text=texto, lang=idioma_gtts, slow=False)
         tts.save(output_file)
         print("⚠️ gTTS usado (último recurso)")
 
@@ -403,7 +418,8 @@ def transcrever_palavras_com_timestamps(audio_path):
     O texto exibido na legenda vem sempre do roteiro original do Gemini.
     """
     whisper_model = _carregar_whisper()
-    segments, _info = whisper_model.transcribe(audio_path, language="pt", word_timestamps=True)
+    idioma_whisper = config.get('idioma_whisper', 'pt')
+    segments, _info = whisper_model.transcribe(audio_path, language=idioma_whisper, word_timestamps=True)
 
     palavras_tempo = []
     for seg in segments:
@@ -831,10 +847,12 @@ def gerar_texto_thumbnail(titulo, tema):
     motivacionais virais — um resumo/gancho direto do título, não o título reescrito.
     Se falhar, usa as 3 primeiras palavras do título como texto de segurança.
     """
-    prompt = f"""Baseado neste vídeo de reflexão cristã/motivacional, crie um texto CURTO para
+    prompt = f"""Baseado neste vídeo de {CONTEXTO_NICHO}, crie um texto CURTO para
 thumbnail de YouTube, em MAIÚSCULAS, no estilo de canais motivacionais virais.
 
-Exemplos de título -> possíveis textos de thumbnail (escolha UMA ideia central, não junte as duas):
+Exemplos de título -> possíveis textos de thumbnail (estilo de referência — escolha UMA ideia
+central, não junte as duas; os exemplos abaixo estão em português só como referência de padrão,
+mas sua resposta deve ser em {IDIOMA_CONTEUDO}):
 "E se você parasse de se preocupar com o amanhã? Descubra a paz que restaura a alma"
 -> "PAZ NA ALMA"  (ou, alternativamente: "PREOCUPAÇÕES?")
 
@@ -848,7 +866,7 @@ TEMA: {tema}
 TÍTULO DO VÍDEO: {titulo}
 
 REGRAS OBRIGATÓRIAS:
-- TODO EM MAIÚSCULAS
+- Escreva em {IDIOMA_CONTEUDO}, TODO EM MAIÚSCULAS
 - Entre 2 e 4 palavras — NUNCA junte duas ideias diferentes na mesma frase
 - Escolha a ideia/palavra mais forte e impactante do título, não tente resumir tudo
 - Impactante, intrigante, desperta curiosidade — não é uma frase explicativa
@@ -868,30 +886,69 @@ Retorne APENAS o texto da thumbnail, nada mais."""
     return " ".join(titulo.split()[:3]).upper()
 
 
+def gerar_imagem_agnes(termo, output_path):
+    """
+    Gera a imagem de fundo da thumbnail via Agnes AI (gratuito). Se falhar por qualquer motivo
+    (sem chave configurada, erro de rede, mudança na API), retorna None — o chamador cai pro
+    fallback do Pexels automaticamente.
+    """
+    if not AGNES_API_KEY:
+        return None
+
+    try:
+        headers = {
+            "Authorization": f"Bearer {AGNES_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "model": AGNES_IMAGE_MODEL,
+            "prompt": f"{termo}, cinematic, high quality, widescreen composition",
+            "size": "1024x576"
+        }
+        resp = requests.post(AGNES_URL, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        dados = resp.json()
+        url_imagem = dados['data'][0]['url']
+
+        img_resp = requests.get(url_imagem, timeout=30)
+        img_resp.raise_for_status()
+        with open(output_path, 'wb') as f:
+            f.write(img_resp.content)
+
+        print("  ✅ Imagem gerada via Agnes AI")
+        return output_path
+    except Exception as e:
+        print(f"  ⚠️ Agnes AI falhou ({e}) — usando fallback do Pexels")
+        return None
+
+
 def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
     """
-    Thumbnail padrão: foto 16:9 do Pexels + faixa preta no topo (1/5 da altura) com o título
-    em duas cores por cima. Se qualquer etapa falhar, retorna None — o vídeo publica normalmente,
-    só sem thumbnail customizada (o YouTube usa uma automática).
+    Thumbnail padrão: imagem 16:9 (Agnes AI, com fallback pro Pexels) + faixa preta no topo
+    (1/5 da altura) com o título em duas cores por cima. Se tudo falhar, retorna None — o vídeo
+    publica normalmente, só sem thumbnail customizada (o YouTube usa uma automática).
     """
     try:
-        fotos = pesquisar_foto_pexels(termo)
-        if not fotos:
-            print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
-            return None
-
-        foto = random.choice(fotos[:5])
-        src = foto.get('src', {})
-        url_imagem = src.get('landscape') or src.get('large') or src.get('original')
-        if not url_imagem:
-            return None
-
-        resp = requests.get(url_imagem, timeout=30)
-        resp.raise_for_status()
-
         caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
-        with open(caminho_bruto, 'wb') as f:
-            f.write(resp.content)
+
+        resultado_agnes = gerar_imagem_agnes(termo, caminho_bruto)
+
+        if not resultado_agnes:
+            fotos = pesquisar_foto_pexels(termo)
+            if not fotos:
+                print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
+                return None
+
+            foto = random.choice(fotos[:5])
+            src = foto.get('src', {})
+            url_imagem = src.get('landscape') or src.get('large') or src.get('original')
+            if not url_imagem:
+                return None
+
+            resp = requests.get(url_imagem, timeout=30)
+            resp.raise_for_status()
+            with open(caminho_bruto, 'wb') as f:
+                f.write(resp.content)
 
         img = Image.open(caminho_bruto).convert('RGB')
 
@@ -1039,8 +1096,10 @@ def main():
     if VIDEO_TYPE == 'short':
         titulo += ' #shorts'
 
-    descricao = roteiro[:300] + '...\n\n🔔 Inscreva-se para reflexões diárias!\n#' + \
-                ('shorts' if VIDEO_TYPE == 'short' else 'reflexao')
+    texto_inscricao = config.get('texto_inscricao', '🔔 Inscreva-se para reflexões diárias!')
+    hashtag_conteudo = config.get('hashtag_conteudo', 'reflexao')
+    descricao = roteiro[:300] + f'...\n\n{texto_inscricao}\n#' + \
+                ('shorts' if VIDEO_TYPE == 'short' else hashtag_conteudo)
     tags = config.get('tags_padrao', ['reflexao crista', 'motivacional', 'fe', 'inspiracao'])
     if VIDEO_TYPE == 'short':
         tags.append('shorts')
