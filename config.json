@@ -367,5 +367,12 @@
   "correcoes_pronuncia": {
     "fascinante": "fassinante",
     "nasce": "nasse"
-  }
+  },
+  "idioma_conteudo": "português do Brasil",
+  "idioma_whisper": "pt",
+  "contexto_nicho": "reflexão cristã/motivacional",
+  "instrucao_extra_roteiro": "Pode referenciar ensinamentos ou princípios bíblicos relacionados ao tema, mas NUNCA cite passagens bíblicas literalmente/palavra por palavra — parafraseie a ideia ou mencione a referência (livro/capítulo) sem transcrever o texto integral, por respeito a direitos autorais de traduções específicas",
+  "texto_inscricao": "🔔 Inscreva-se para reflexões diárias!",
+  "hashtag_conteudo": "reflexao",
+  "idioma_gtts": "pt-br"
 }
