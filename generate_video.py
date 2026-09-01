@@ -14,6 +14,8 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
+from roteiro_engine import gerar_pacote_roteiro
+
 # ============================================================
 # Curadoria via Telegram (opcional)
 # ============================================================
@@ -68,9 +70,7 @@ DURACAO_MAXIMA_CLIPE = float(os.environ.get('DURACAO_MAXIMA_CLIPE', '20'))
 
 # ── Legenda automática ───────────────────────────────────────────────────────
 ATIVAR_LEGENDA = os.environ.get('ATIVAR_LEGENDA', 'true').lower() == 'true'
-# Liberation Sans Bold: clone livre, metricamente compatível com Helvetica/Arial,
-# normalmente já vem instalada em runners Ubuntu do GitHub Actions.
-LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', 'Liberation-Sans-Bold')
+# LEGENDA_FONTE é definida logo após o carregamento do config.json (precisa do config.get(...))
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel(GEMINI_TEXT_MODEL)
@@ -101,6 +101,15 @@ with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
 IDIOMA_CONTEUDO = config.get('idioma_conteudo', 'português do Brasil')
 CONTEXTO_NICHO = config.get('contexto_nicho', 'reflexão cristã/motivacional')
 INSTRUCAO_EXTRA_ROTEIRO = config.get('instrucao_extra_roteiro', '')
+
+# Fonte da legenda: nome da família (como o ImageMagick/fontconfig reconhece após instalado
+# no runner — veja o step do .yml que instala as fontes de fonts/ no sistema).
+# Liberation Sans Bold é o padrão livre, geralmente já vem instalado no runner sem esforço extra.
+LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', config.get('fonte_legenda_nome', 'Liberation-Sans-Bold'))
+
+# Fonte da thumbnail: caminho direto do arquivo .ttf no repositório (PIL carrega o arquivo
+# diretamente, não precisa estar instalada no sistema).
+FONTE_THUMBNAIL_ARQUIVO = config.get('fonte_thumbnail_arquivo', '')
 
 
 # ============================================================
@@ -825,9 +834,15 @@ _FONTE_TTF_CANDIDATOS = [
 
 
 def _carregar_fonte_pil(tamanho):
+    # Prioridade 1: fonte customizada definida no config.json (ex: fonts/RoadRage-Regular.ttf)
+    if FONTE_THUMBNAIL_ARQUIVO and os.path.exists(FONTE_THUMBNAIL_ARQUIVO):
+        return ImageFont.truetype(FONTE_THUMBNAIL_ARQUIVO, tamanho)
+
+    # Prioridade 2: fontes de sistema conhecidas (fallback pros canais que não têm fonte própria)
     for caminho in _FONTE_TTF_CANDIDATOS:
         if os.path.exists(caminho):
             return ImageFont.truetype(caminho, tamanho)
+
     print("  ⚠️ Nenhuma fonte TTF encontrada — usando fonte padrão do PIL (qualidade menor)")
     return ImageFont.load_default()
 
@@ -922,94 +937,231 @@ def gerar_imagem_agnes(termo, output_path):
         return None
 
 
+def _cortar_para_ratio(img, largura, altura):
+    """Corta uma imagem PIL pro ratio exato largura:altura, cobrindo o quadro sem distorcer."""
+    alvo_ratio = largura / altura
+    img_ratio = img.width / img.height
+    if img_ratio > alvo_ratio:
+        novo_w = int(img.height * alvo_ratio)
+        corte = (img.width - novo_w) // 2
+        img = img.crop((corte, 0, corte + novo_w, img.height))
+    else:
+        novo_h = int(img.width / alvo_ratio)
+        corte = (img.height - novo_h) // 2
+        img = img.crop((0, corte, img.width, corte + novo_h))
+    return img.resize((largura, altura))
+
+
+def _gerar_thumbnail_pexels_agnes(titulo, termo, output_path, largura, altura):
+    """Método padrão: imagem de fundo via Agnes AI (fallback Pexels) + faixa preta no topo com título."""
+    caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
+
+    resultado_agnes = gerar_imagem_agnes(termo, caminho_bruto)
+
+    if not resultado_agnes:
+        fotos = pesquisar_foto_pexels(termo)
+        if not fotos:
+            print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
+            return None
+
+        foto = random.choice(fotos[:5])
+        src = foto.get('src', {})
+        url_imagem = src.get('landscape') or src.get('large') or src.get('original')
+        if not url_imagem:
+            return None
+
+        resp = requests.get(url_imagem, timeout=30)
+        resp.raise_for_status()
+        with open(caminho_bruto, 'wb') as f:
+            f.write(resp.content)
+
+    img = Image.open(caminho_bruto).convert('RGB')
+    img = _cortar_para_ratio(img, largura, altura)
+
+    draw = ImageDraw.Draw(img)
+    altura_faixa = int(altura / 5)
+    draw.rectangle([(0, 0), (largura, altura_faixa)], fill=(0, 0, 0))
+
+    palavras = titulo.split()
+    meio = max(1, len(palavras) // 2)
+    parte1 = " ".join(palavras[:meio])
+    parte2 = " ".join(palavras[meio:])
+
+    tamanho_fonte = int(altura_faixa * 0.78)
+    tamanho_minimo = int(altura_faixa * 0.30)
+    espaco = 24
+
+    while tamanho_fonte >= tamanho_minimo:
+        fonte = _carregar_fonte_pil(tamanho_fonte)
+        bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
+        bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
+        largura1 = bbox1[2] - bbox1[0]
+        largura2 = bbox2[2] - bbox2[0]
+        if largura1 + espaco + largura2 <= largura * 0.94:
+            break
+        tamanho_fonte = int(tamanho_fonte * 0.9)
+
+    if largura1 + espaco + largura2 <= largura * 0.94:
+        x = (largura - (largura1 + espaco + largura2)) // 2
+        y = (altura_faixa - (bbox1[3] - bbox1[1])) // 2
+        draw.text((x, y), parte1, font=fonte, fill=(255, 215, 0))
+        draw.text((x + largura1 + espaco, y), parte2, font=fonte, fill=(255, 255, 255))
+    else:
+        fonte = _carregar_fonte_pil(int(altura_faixa * 0.30))
+        bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
+        bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
+        y1 = int(altura_faixa * 0.06)
+        y2 = int(altura_faixa * 0.52)
+        draw.text(((largura - (bbox1[2] - bbox1[0])) // 2, y1), parte1, font=fonte, fill=(255, 215, 0))
+        draw.text(((largura - (bbox2[2] - bbox2[0])) // 2, y2), parte2, font=fonte, fill=(255, 255, 255))
+
+    img.save(output_path, quality=90)
+    return output_path
+
+
+# ============================================================
+# Thumbnail — método "pool local" (imagens prontas + rotatividade)
+# ============================================================
+
+THUMBS_LOG_FILE = 'thumbs_usadas.json'
+
+
+def _carregar_thumbs_usadas():
+    if os.path.exists(THUMBS_LOG_FILE):
+        try:
+            with open(THUMBS_LOG_FILE, 'r', encoding='utf-8') as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
+    return set()
+
+
+def _salvar_thumb_usada(nome_arquivo):
+    usadas = _carregar_thumbs_usadas()
+    usadas.add(nome_arquivo)
+    with open(THUMBS_LOG_FILE, 'w', encoding='utf-8') as f:
+        json.dump(sorted(usadas), f, indent=2, ensure_ascii=False)
+
+
+def escolher_imagem_thumbnail_pool():
+    """
+    Escolhe uma imagem da pasta de thumbnails prontas (config['pasta_thumbs'], padrão 'thumbs/'),
+    sem repetir nenhuma até que todas já tenham sido usadas — aí o ciclo reinicia.
+    """
+    pasta = config.get('pasta_thumbs', 'thumbs')
+    if not os.path.isdir(pasta):
+        print(f"  ⚠️ Pasta de thumbnails '{pasta}' não encontrada")
+        return None
+
+    todas = [f for f in os.listdir(pasta) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    if not todas:
+        print(f"  ⚠️ Nenhuma imagem encontrada em '{pasta}'")
+        return None
+
+    usadas = _carregar_thumbs_usadas()
+    disponiveis = [f for f in todas if f not in usadas]
+
+    if not disponiveis:
+        print("  🔄 Todas as thumbnails já foram usadas — reiniciando o ciclo de rotatividade")
+        disponiveis = todas
+
+    escolhida = random.choice(disponiveis)
+    return os.path.join(pasta, escolhida), escolhida
+
+
+def _quebrar_em_linhas(palavras, palavras_por_linha=2):
+    """Agrupa palavras em linhas de até N palavras cada (padrão: 2 por linha)."""
+    return [' '.join(palavras[i:i + palavras_por_linha]) for i in range(0, len(palavras), palavras_por_linha)]
+
+
+def _gerar_thumbnail_pool_local(texto_thumb, output_path, largura, altura):
+    """
+    Método alternativo: usa uma imagem pronta de config['pasta_thumbs'] (metade esquerda com
+    cenário/personagem, metade direita já escurecida no design da própria imagem), sem faixa
+    preta — o texto (2-3 linhas, 2 cores) é desenhado direto na metade direita.
+    """
+    resultado = escolher_imagem_thumbnail_pool()
+    if not resultado:
+        return None
+    caminho_imagem, nome_arquivo = resultado
+
+    img = Image.open(caminho_imagem).convert('RGB')
+    img = _cortar_para_ratio(img, largura, altura)
+    draw = ImageDraw.Draw(img)
+
+    palavras = texto_thumb.split()
+    linhas = _quebrar_em_linhas(palavras, palavras_por_linha=2)
+
+    # Região de texto: metade direita da imagem, com margem
+    x_inicio = int(largura * 0.52)
+    largura_disponivel = int(largura * 0.94) - x_inicio
+
+    tamanho_fonte = int(altura * 0.16)
+    tamanho_minimo = int(altura * 0.06)
+    espacamento = int(altura * 0.02)
+
+    def _medir(linhas_teste, fonte):
+        alturas, larguras = [], []
+        for linha in linhas_teste:
+            bbox = draw.textbbox((0, 0), linha, font=fonte)
+            larguras.append(bbox[2] - bbox[0])
+            alturas.append(bbox[3] - bbox[1])
+        return larguras, alturas
+
+    # Auto-ajuste: reduz a fonte até todas as linhas caberem na largura disponível;
+    # se mesmo no tamanho mínimo não couber, quebra em mais linhas (1 palavra cada)
+    fonte = _carregar_fonte_pil(tamanho_fonte)
+    larguras, alturas = _medir(linhas, fonte)
+
+    while max(larguras) > largura_disponivel and tamanho_fonte > tamanho_minimo:
+        tamanho_fonte = int(tamanho_fonte * 0.9)
+        fonte = _carregar_fonte_pil(tamanho_fonte)
+        larguras, alturas = _medir(linhas, fonte)
+
+    if max(larguras) > largura_disponivel and len(palavras) > len(linhas):
+        # Ainda não coube — quebra em 1 palavra por linha e tenta de novo
+        linhas = _quebrar_em_linhas(palavras, palavras_por_linha=1)
+        tamanho_fonte = int(altura * 0.16)
+        fonte = _carregar_fonte_pil(tamanho_fonte)
+        larguras, alturas = _medir(linhas, fonte)
+        while max(larguras) > largura_disponivel and tamanho_fonte > tamanho_minimo:
+            tamanho_fonte = int(tamanho_fonte * 0.9)
+            fonte = _carregar_fonte_pil(tamanho_fonte)
+            larguras, alturas = _medir(linhas, fonte)
+
+    altura_bloco = sum(alturas) + espacamento * (len(linhas) - 1)
+    y = (altura - altura_bloco) // 2
+    cores = [(255, 215, 0), (255, 255, 255)]  # alterna dourado/branco por linha
+
+    for i, linha in enumerate(linhas):
+        x = x_inicio + (largura_disponivel - larguras[i]) // 2
+        draw.text((x, y), linha, font=fonte, fill=cores[i % len(cores)])
+        y += alturas[i] + espacamento
+
+    img.save(output_path, quality=90)
+    _salvar_thumb_usada(nome_arquivo)
+    print(f"  ✅ Thumbnail gerada a partir de '{nome_arquivo}' (pool local)")
+    return output_path
+
+
 def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
     """
-    Thumbnail padrão: imagem 16:9 (Agnes AI, com fallback pro Pexels) + faixa preta no topo
-    (1/5 da altura) com o título em duas cores por cima. Se tudo falhar, retorna None — o vídeo
-    publica normalmente, só sem thumbnail customizada (o YouTube usa uma automática).
+    Gera a thumbnail final. 'titulo' aqui já é o texto curto gerado por gerar_texto_thumbnail()
+    (quem chama essa função já faz essa conversão antes). O método usado depende de
+    config['metodo_thumbnail']:
+    - "pexels_agnes" (padrão): imagem via Agnes AI/Pexels + faixa preta no topo
+    - "pool_local": imagem pronta de config['pasta_thumbs'], com rotatividade, texto na metade
+      direita (pensado pra imagens já com metade direita escurecida no próprio design)
+    Se qualquer etapa falhar, retorna None — o vídeo publica normalmente, só sem thumbnail
+    customizada (o YouTube usa uma automática).
     """
+    metodo = config.get('metodo_thumbnail', 'pexels_agnes')
+
     try:
-        caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
-
-        resultado_agnes = gerar_imagem_agnes(termo, caminho_bruto)
-
-        if not resultado_agnes:
-            fotos = pesquisar_foto_pexels(termo)
-            if not fotos:
-                print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
-                return None
-
-            foto = random.choice(fotos[:5])
-            src = foto.get('src', {})
-            url_imagem = src.get('landscape') or src.get('large') or src.get('original')
-            if not url_imagem:
-                return None
-
-            resp = requests.get(url_imagem, timeout=30)
-            resp.raise_for_status()
-            with open(caminho_bruto, 'wb') as f:
-                f.write(resp.content)
-
-        img = Image.open(caminho_bruto).convert('RGB')
-
-        # Corta pra 16:9 exato (cobrindo o quadro, sem distorcer)
-        alvo_ratio = largura / altura
-        img_ratio = img.width / img.height
-        if img_ratio > alvo_ratio:
-            novo_w = int(img.height * alvo_ratio)
-            corte = (img.width - novo_w) // 2
-            img = img.crop((corte, 0, corte + novo_w, img.height))
+        if metodo == 'pool_local':
+            return _gerar_thumbnail_pool_local(titulo, output_path, largura, altura)
         else:
-            novo_h = int(img.width / alvo_ratio)
-            corte = (img.height - novo_h) // 2
-            img = img.crop((0, corte, img.width, corte + novo_h))
-        img = img.resize((largura, altura))
-
-        draw = ImageDraw.Draw(img)
-        altura_faixa = int(altura / 5)
-        draw.rectangle([(0, 0), (largura, altura_faixa)], fill=(0, 0, 0))
-
-        # Texto curto em 2 cores (dourado + branco) — dá destaque sem precisar de imagem extra
-        palavras = titulo.split()
-        meio = max(1, len(palavras) // 2)
-        parte1 = " ".join(palavras[:meio])
-        parte2 = " ".join(palavras[meio:])
-
-        # Como o texto agora é curto (2-4 palavras), começa BEM grande e só reduz se não couber
-        tamanho_fonte = int(altura_faixa * 0.78)
-        tamanho_minimo = int(altura_faixa * 0.30)
-        espaco = 24
-
-        while tamanho_fonte >= tamanho_minimo:
-            fonte = _carregar_fonte_pil(tamanho_fonte)
-            bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
-            bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
-            largura1 = bbox1[2] - bbox1[0]
-            largura2 = bbox2[2] - bbox2[0]
-            if largura1 + espaco + largura2 <= largura * 0.94:
-                break
-            tamanho_fonte = int(tamanho_fonte * 0.9)
-
-        if largura1 + espaco + largura2 <= largura * 0.94:
-            # Cabe lado a lado numa linha só
-            x = (largura - (largura1 + espaco + largura2)) // 2
-            y = (altura_faixa - (bbox1[3] - bbox1[1])) // 2
-            draw.text((x, y), parte1, font=fonte, fill=(255, 215, 0))
-            draw.text((x + largura1 + espaco, y), parte2, font=fonte, fill=(255, 255, 255))
-        else:
-            # Não coube — empilha em 2 linhas com fonte um pouco menor
-            fonte = _carregar_fonte_pil(int(altura_faixa * 0.30))
-            bbox1 = draw.textbbox((0, 0), parte1, font=fonte)
-            bbox2 = draw.textbbox((0, 0), parte2, font=fonte)
-            y1 = int(altura_faixa * 0.06)
-            y2 = int(altura_faixa * 0.52)
-            draw.text(((largura - (bbox1[2] - bbox1[0])) // 2, y1), parte1, font=fonte, fill=(255, 215, 0))
-            draw.text(((largura - (bbox2[2] - bbox2[0])) // 2, y2), parte2, font=fonte, fill=(255, 255, 255))
-
-        img.save(output_path, quality=90)
-        print(f"  ✅ Thumbnail gerada: {output_path}")
-        return output_path
-
+            return _gerar_thumbnail_pexels_agnes(titulo, termo, output_path, largura, altura)
     except Exception as e:
         print(f"  ⚠️ Erro ao gerar thumbnail: {e} — publicando sem thumbnail customizada")
         return None
@@ -1017,7 +1169,6 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
 
 def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=None):
     creds_dict = json.loads(YOUTUBE_CREDENTIALS)
-    print(f"CLIENT_ID em uso (YouTube): {creds_dict.get('client_id')}")  # <- linha temporária
     credentials = Credentials.from_authorized_user_info(creds_dict)
     youtube = build('youtube', 'v3', credentials=credentials)
 
@@ -1046,13 +1197,26 @@ def main():
     os.makedirs(ASSETS_DIR, exist_ok=True)
 
     tema = escolher_tema_reflexao()
-    titulo_video = gerar_titulo(tema)
-    print(f"🎯 Título: {titulo_video}")
 
-    print("✍️ Gerando roteiro...")
-    roteiro = gerar_roteiro(tema, VIDEO_TYPE)
-    print("🔍 Revisando roteiro (ortografia/gramática)...")
-    roteiro = revisar_roteiro(roteiro)
+    print("✍️ Gerando roteiro (cadeia: tese → estrutura → escrita → crítica → título/descrição)...")
+    pacote_roteiro = gerar_pacote_roteiro(
+        tema=tema,
+        contexto_nicho=CONTEXTO_NICHO,
+        idioma_conteudo=IDIOMA_CONTEUDO,
+        instrucao_extra=INSTRUCAO_EXTRA_ROTEIRO,
+        documento_estilo=config.get('documento_estilo', []),
+        tipo_video=VIDEO_TYPE,
+        gemini_generate_fn=_gemini_generate,
+    )
+    roteiro = pacote_roteiro['roteiro_texto']
+    titulo_video = pacote_roteiro['titulo']
+    blocos_roteiro = pacote_roteiro['roteiro_blocos']  # reservado para Fase 2 (B-roll por bloco)
+    print(f"🎯 Título: {titulo_video}")
+    if pacote_roteiro.get('tese'):
+        print(f"🧭 Tese: {pacote_roteiro['tese']}")
+    # revisar_roteiro() antigo não é mais necessário: o Estágio 4 da cadeia (crítica
+    # adversarial) já cobre correção de qualidade; ortografia grosseira é rara no Gemini
+    # e o roteiro já passa por _extrair_json, que falharia com texto muito malformado.
 
     audio_path = f'{ASSETS_DIR}/audio.mp3'
     texto_falado = aplicar_correcoes_pronuncia(roteiro)
@@ -1099,7 +1263,12 @@ def main():
 
     texto_inscricao = config.get('texto_inscricao', '🔔 Inscreva-se para reflexões diárias!')
     hashtag_conteudo = config.get('hashtag_conteudo', 'reflexao')
-    descricao = roteiro[:300] + f'...\n\n{texto_inscricao}\n#' + \
+    descricao_pacote = pacote_roteiro.get('descricao') or {}
+    corpo_descricao = (
+        f"{descricao_pacote.get('abertura_seo', '')}\n\n{descricao_pacote.get('corpo', '')}"
+        if descricao_pacote.get('corpo') else roteiro[:300] + '...'
+    )
+    descricao = corpo_descricao + f'\n\n{texto_inscricao}\n#' + \
                 ('shorts' if VIDEO_TYPE == 'short' else hashtag_conteudo)
     tags = config.get('tags_padrao', ['reflexao crista', 'motivacional', 'fe', 'inspiracao'])
     if VIDEO_TYPE == 'short':
