@@ -1,7 +1,6 @@
 {
   "canal": "Reflexao Diaria",
   "voz_fallback": "pt-BR-ThalitaMultilingualNeural",
-  "metodo_thumbnail": "pexels_agnes",
   "tags_padrao": [
     "reflexao crista",
     "motivacional",
@@ -9,12 +8,6 @@
     "inspiracao",
     "mensagem do dia",
     "biblia"
-  ],
-  "documento_estilo": [
-    "COLE AQUI 3-5 trechos reais de roteiros seus que você considera bons — isso é o que",
-    "força o modelo a escrever na SUA voz em vez de regredir pro genérico a cada vídeo novo.",
-    "Deixe como está (vazio) se ainda não tiver exemplos; a cadeia funciona sem isso, só com",
-    "qualidade de voz mais genérica até você preencher."
   ],
   "temas_reflexao": [
     "gratidão nas pequenas coisas",
