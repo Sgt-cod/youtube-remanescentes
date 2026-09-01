@@ -15,6 +15,13 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
 from roteiro_engine import gerar_pacote_roteiro
+from producao_visual import (
+    mapear_tempos_para_blocos,
+    escolher_termos_por_bloco,
+    escolher_palavras_destaque,
+    resolver_destaques_com_tempo,
+    construir_timeline_sfx,
+)
 
 # ============================================================
 # Curadoria via Telegram (opcional)
@@ -70,6 +77,9 @@ DURACAO_MAXIMA_CLIPE = float(os.environ.get('DURACAO_MAXIMA_CLIPE', '20'))
 
 # ── Legenda automática ───────────────────────────────────────────────────────
 ATIVAR_LEGENDA = os.environ.get('ATIVAR_LEGENDA', 'true').lower() == 'true'
+ATIVAR_DESTAQUE = os.environ.get('ATIVAR_DESTAQUE', 'true').lower() == 'true'  # Fase 2: texto de destaque
+ATIVAR_SFX = os.environ.get('ATIVAR_SFX', 'true').lower() == 'true'  # Fase 2: SFX de transição/destaque
+MAX_PAGINAS_BLOCO = int(os.environ.get('MAX_PAGINAS_BLOCO', '3'))  # páginas Pexels por bloco (não por vídeo)
 # LEGENDA_FONTE é definida logo após o carregamento do config.json (precisa do config.get(...))
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -106,6 +116,7 @@ INSTRUCAO_EXTRA_ROTEIRO = config.get('instrucao_extra_roteiro', '')
 # no runner — veja o step do .yml que instala as fontes de fonts/ no sistema).
 # Liberation Sans Bold é o padrão livre, geralmente já vem instalado no runner sem esforço extra.
 LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', config.get('fonte_legenda_nome', 'Liberation-Sans-Bold'))
+COR_DESTAQUE = os.environ.get('COR_DESTAQUE', config.get('cor_destaque', '#FFD24D'))  # Fase 2: texto de destaque
 
 # Fonte da thumbnail: caminho direto do arquivo .ttf no repositório (PIL carrega o arquivo
 # diretamente, não precisa estar instalada no sistema).
@@ -438,10 +449,12 @@ def transcrever_palavras_com_timestamps(audio_path):
     return palavras_tempo
 
 
-def gerar_clips_legenda(audio_path, roteiro, largura, altura, offset=0.0, palavras_por_bloco=7):
+def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, palavras_por_bloco=7):
     """
     Gera os clipes de texto (legenda) centralizados, sincronizados com a narração.
-    O TEXTO vem do roteiro original (sempre correto); o TEMPO vem do Whisper (alinhamento).
+    O TEXTO vem do roteiro original (sempre correto); o TEMPO vem do Whisper (alinhamento),
+    já transcrito uma única vez em main() e reaproveitado aqui (e em gerar_clips_destaque,
+    e no mapeamento de blocos) — evita rodar o Whisper mais de uma vez por vídeo.
     As palavras do roteiro são pareadas em ordem com os timestamps detectados pelo Whisper —
     pequena diferença na contagem de palavras é normal e não quebra o alinhamento, só desloca
     ligeiramente o fim do vídeo (raramente perceptível).
@@ -451,14 +464,8 @@ def gerar_clips_legenda(audio_path, roteiro, largura, altura, offset=0.0, palavr
     if not ATIVAR_LEGENDA:
         return []
 
-    try:
-        palavras_tempo = transcrever_palavras_com_timestamps(audio_path)
-    except Exception as e:
-        print(f"⚠️ Não foi possível transcrever para legenda: {e} — seguindo sem legenda")
-        return []
-
     if not palavras_tempo:
-        print("⚠️ Whisper não retornou timestamps de palavra — seguindo sem legenda")
+        print("⚠️ Sem timestamps de palavra disponíveis — seguindo sem legenda")
         return []
 
     palavras_roteiro = roteiro.split()
@@ -507,6 +514,47 @@ def gerar_clips_legenda(audio_path, roteiro, largura, altura, offset=0.0, palavr
     else:
         print(f"✅ {len(clips)} bloco(s) de legenda gerado(s), com texto do roteiro original")
 
+    return clips
+
+
+def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura, altura, offset=0.0):
+    """
+    Fase 2: texto de destaque — diferente da legenda comum (gerar_clips_legenda), isso é
+    o "grito visual" tipo webdoc: só a palavra/expressão marcada como importante, maior,
+    em cor de destaque, posicionada no terço inferior, aparecendo exatamente no timestamp
+    em que a palavra é falada (destaques_resolvidos já vem com o tempo resolvido por
+    producao_visual.resolver_destaques_com_tempo).
+    """
+    if not ATIVAR_DESTAQUE or not destaques_resolvidos:
+        return []
+
+    fontsize = max(44, int(largura / 9))
+    largura_texto = int(largura * 0.9)
+    clips = []
+
+    for destaque in destaques_resolvidos:
+        try:
+            txt_clip = TextClip(
+                destaque['texto'].upper(),
+                fontsize=fontsize,
+                font=LEGENDA_FONTE,
+                color=COR_DESTAQUE,
+                stroke_color='black',
+                stroke_width=max(2, fontsize // 14),
+                method='caption',
+                size=(largura_texto, None),
+                align='center'
+            )
+            txt_clip = txt_clip.set_position(('center', int(altura * 0.72)))
+            txt_clip = txt_clip.set_start(offset + destaque['inicio'])
+            duracao = max(0.6, (destaque['fim'] - destaque['inicio']) + 0.3)
+            txt_clip = txt_clip.set_duration(duracao).crossfadein(0.15)
+            clips.append(txt_clip)
+        except Exception as e:
+            print(f"  ⚠️ Erro ao gerar destaque '{destaque.get('texto')}': {e} — pulando")
+
+    if clips:
+        print(f"✨ {len(clips)} destaque(s) visual(is) gerado(s)")
     return clips
 
 
@@ -674,9 +722,99 @@ def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
     return clipes
 
 
+def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
+    """
+    Fase 2 — B-roll casado por BLOCO do roteiro, não pelo vídeo inteiro: cada bloco
+    (gancho, evidência, objeção...) já chegou aqui com seu próprio 'termo' (escolhido por
+    producao_visual.escolher_termos_por_bloco) e sua própria janela de tempo dentro da
+    narração (bloco['inicio']/['duracao'], de mapear_tempos_para_blocos). Cada clipe baixado
+    já nasce posicionado no tempo certo — sem isso, o vídeo inteiro usava só 1 termo de busca.
+    Compartilha o histórico anti-repetição do Pexels entre todos os blocos do mesmo vídeo,
+    pra não repetir o mesmo vídeo em blocos diferentes do mesmo short/vídeo longo.
+    Se o roteiro caiu no fallback simples (1 bloco só, 'roteiro_completo'), isso se comporta
+    exatamente como a antiga baixar_clipes_pexels() — degrada graciosamente, não quebra nada.
+    """
+    largura_alvo = 1080 if orientacao == 'portrait' else 1920
+    os.makedirs(f'{ASSETS_DIR}/pexels', exist_ok=True)
+
+    usados_recentemente = _carregar_pexels_usados_recentes()
+    usados_no_video = set()
+    print(f"  📋 {len(usados_recentemente)} vídeo(s) no histórico dos últimos "
+          f"{DIAS_EVITAR_REPETICAO_PEXELS} dias (serão evitados)")
+
+    todos_os_clipes = []
+    for bloco in blocos_com_tempo:
+        termo = bloco['termo']
+        duracao_alvo = bloco['duracao']
+        offset_bloco = bloco['inicio']
+
+        print(f"  🎯 Bloco '{bloco['bloco']}' ({duracao_alvo:.1f}s) — termo: '{termo}'")
+
+        tempo_coberto = 0.0
+        pagina = 1
+        while tempo_coberto < duracao_alvo and pagina <= MAX_PAGINAS_BLOCO:
+            if LIMITE_CLIPES_TESTE > 0 and len(todos_os_clipes) >= LIMITE_CLIPES_TESTE:
+                print(f"   ✂️ MODO TESTE: limitado a {LIMITE_CLIPES_TESTE} clipe(s) no total")
+                return todos_os_clipes
+
+            videos_encontrados = pesquisar_videos_pexels(termo, orientacao, pagina=pagina)
+            if not videos_encontrados:
+                print(f"    ⚠️ Página {pagina} sem resultados para '{termo}'")
+                break
+            random.shuffle(videos_encontrados)
+
+            for video in videos_encontrados:
+                if tempo_coberto >= duracao_alvo:
+                    break
+                if LIMITE_CLIPES_TESTE > 0 and len(todos_os_clipes) >= LIMITE_CLIPES_TESTE:
+                    break
+
+                video_id = video.get('id')
+                if video_id in usados_no_video or video_id in usados_recentemente:
+                    continue
+
+                arquivo = _escolher_arquivo_video(video.get('video_files', []), largura_alvo)
+                if not arquivo:
+                    continue
+
+                destino = f"{ASSETS_DIR}/pexels/{video_id}.mp4"
+                try:
+                    resp = requests.get(arquivo['link'], timeout=60)
+                    resp.raise_for_status()
+                    with open(destino, 'wb') as f:
+                        f.write(resp.content)
+                except Exception as e:
+                    print(f"    ⚠️ Erro ao baixar vídeo {video_id}: {e}")
+                    continue
+
+                usados_no_video.add(video_id)
+                duracao_disponivel = video.get('duration', 6)
+                duracao_uso = min(duracao_disponivel, DURACAO_MAXIMA_CLIPE, duracao_alvo - tempo_coberto)
+
+                todos_os_clipes.append({
+                    'path': destino,
+                    'inicio': offset_bloco + tempo_coberto,
+                    'duracao': duracao_uso,
+                    'transicao_bloco': (tempo_coberto == 0.0),  # 1º clipe do bloco → leva transição
+                })
+                tempo_coberto += duracao_uso
+                _salvar_pexels_usado(video_id)
+
+            pagina += 1
+
+        if tempo_coberto < duracao_alvo:
+            print(f"    ⚠️ Cobertura parcial do bloco: {tempo_coberto:.1f}s/{duracao_alvo:.1f}s")
+
+    print(f"  ✅ {len(todos_os_clipes)} clipe(s) baixado(s) no total, casados por bloco do roteiro")
+    return todos_os_clipes
+
+
 # ============================================================
 # MONTAGEM DE VÍDEO
 # ============================================================
+
+DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.5'))  # crossfade entre blocos, em segundos
+
 
 def _preparar_clip_pexels(item, largura, altura):
     clip = VideoFileClip(item['path'])
@@ -695,11 +833,25 @@ def _preparar_clip_pexels(item, largura, altura):
 
 
 def _montar_clips_pexels(lista_clipes, largura, altura):
-    """Sem transição — corte seco entre clipes (vídeo real já tem movimento próprio)."""
+    """
+    Corte seco dentro do mesmo bloco (vídeo real já tem movimento próprio, não precisa
+    de transição). Crossfade suave (DURACAO_TRANSICAO) só na TROCA de bloco do roteiro —
+    é o que dá a sensação de "capítulo novo" em vez de só mais um corte de B-roll, sem
+    precisar de pacote de vídeos de transição (glitch/flash) externo.
+    Um crossfade de verdade precisa de SOBREPOSIÇÃO entre os dois clipes (não só um
+    fade-in isolado, que resultaria em fade-pro-preto): por isso o clipe que abre o
+    bloco novo tem o início antecipado em DURACAO_TRANSICAO, e o clipe anterior recebe
+    fade-out no mesmo intervalo.
+    """
     clips_prontos = []
     for i, item in enumerate(lista_clipes):
         try:
-            clips_prontos.append(_preparar_clip_pexels(item, largura, altura))
+            clip = _preparar_clip_pexels(item, largura, altura)
+            if i > 0 and item.get('transicao_bloco') and clips_prontos:
+                clip = clip.set_start(max(0, item['inicio'] - DURACAO_TRANSICAO))
+                clip = clip.crossfadein(DURACAO_TRANSICAO)
+                clips_prontos[-1] = clips_prontos[-1].crossfadeout(DURACAO_TRANSICAO)
+            clips_prontos.append(clip)
         except Exception as e:
             print(f"  ⚠️ Erro ao preparar clipe {i}: {e}")
     return clips_prontos
@@ -729,12 +881,62 @@ def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir=
     return CompositeAudioClip([audio_narracao, musica])
 
 
-def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
+def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
+    """
+    Fase 2 — camada de SFX orientada a evento, mesmo espírito de fallback gracioso do
+    _mixar_musica_fundo: toca um som curto a cada troca de bloco (evento 'transicao')
+    e a cada destaque visual que aparece (evento 'destaque'). Se a pasta correspondente
+    não tiver arquivo, essa camada simplesmente não ativa — não quebra o vídeo.
+
+    Preencha (efeitos curtos, licença livre — ex: CC0 do Freesound):
+        assets/sfx/transicao/*.mp3  (ex: whoosh curto, corte seco)
+        assets/sfx/destaque/*.mp3   (ex: pop, ping, impacto leve)
+    """
+    if not ATIVAR_SFX or not eventos_sfx:
+        return audio_base
+
+    import glob
+    from moviepy.editor import AudioFileClip, CompositeAudioClip
+
+    bibliotecas = {}
+    for tipo in ('transicao', 'destaque'):
+        arquivos = glob.glob(f'{sfx_dir}/{tipo}/*.mp3') + glob.glob(f'{sfx_dir}/{tipo}/*.wav')
+        bibliotecas[tipo] = arquivos
+
+    if not any(bibliotecas.values()):
+        print("  ℹ️ Nenhum SFX encontrado em assets/sfx/ — seguindo sem camada de som de eventos")
+        return audio_base
+
+    camadas = [audio_base]
+    aplicados = 0
+    for evento in eventos_sfx:
+        arquivos = bibliotecas.get(evento['tipo'], [])
+        if not arquivos:
+            continue
+        arquivo = random.choice(arquivos)
+        try:
+            sfx_clip = AudioFileClip(arquivo).set_start(offset + evento['tempo']).volumex(0.5)
+            camadas.append(sfx_clip)
+            aplicados += 1
+        except Exception as e:
+            print(f"  ⚠️ Erro ao carregar SFX '{arquivo}': {e}")
+
+    if aplicados == 0:
+        return audio_base
+
+    print(f"  🔊 {aplicados} evento(s) de SFX aplicado(s)")
+    return CompositeAudioClip(camadas)
+
+
+def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_narracao,
+                       clips_legenda=None, clips_destaque=None, eventos_sfx=None):
     """
     Vertical (short). Estrutura de tempo:
     [0s ───── música+vídeo ─────][3s narração começa ───...──][fim narração ── +5s música+vídeo][fade-out 2s]
     """
     print("📹 Criando short (Pexels)...")
+    clips_legenda = clips_legenda or []
+    clips_destaque = clips_destaque or []
     duracao_total = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
 
     clips_video = _montar_clips_pexels(lista_clipes, 1080, 1920)
@@ -746,13 +948,14 @@ def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_na
     if cobertura < duracao_total:
         clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1080, 1920, offset=SEGUNDOS_LEAD_IN)
-
-    video_base = CompositeVideoClip(clips_video + clips_legenda, size=(1080, 1920)).set_duration(duracao_total)
+    video_base = CompositeVideoClip(
+        clips_video + clips_legenda + clips_destaque, size=(1080, 1920)
+    ).set_duration(duracao_total)
     video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
 
     audio_narr = AudioFileClip(audio_path).set_start(SEGUNDOS_LEAD_IN)
-    audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
+    audio_com_sfx = aplicar_sfx(audio_narr, eventos_sfx or [], offset=SEGUNDOS_LEAD_IN)
+    audio_final = _mixar_musica_fundo(audio_com_sfx, duracao_total, volume=0.06)
     audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
     video_final = video_base.set_audio(audio_final)
@@ -766,9 +969,12 @@ def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_na
     return output_file
 
 
-def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
+def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_narracao,
+                       clips_legenda=None, clips_destaque=None, eventos_sfx=None):
     """Horizontal (long), com intro fixa de assets/intro/ antes do bloco lead-in/narração/tail."""
     print("📹 Criando vídeo longo (Pexels + intro)...")
+    clips_legenda = clips_legenda or []
+    clips_destaque = clips_destaque or []
 
     import glob
     intros = glob.glob(f'{ASSETS_DIR}/intro/*.mp4') + glob.glob(f'{ASSETS_DIR}/intro/*.mov')
@@ -803,17 +1009,18 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
         if cobertura < duracao_total:
             clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1920, 1080, offset=intro_duracao + SEGUNDOS_LEAD_IN)
+    offset_narracao = intro_duracao + SEGUNDOS_LEAD_IN
 
-    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda
+    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda + clips_destaque
     if not todos_os_clips:
         return None
 
     video_base = CompositeVideoClip(todos_os_clips, size=(1920, 1080)).set_duration(duracao_total)
     video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
 
-    audio_narr = AudioFileClip(audio_path).set_start(intro_duracao + SEGUNDOS_LEAD_IN)
-    audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
+    audio_narr = AudioFileClip(audio_path).set_start(offset_narracao)
+    audio_com_sfx = aplicar_sfx(audio_narr, eventos_sfx or [], offset=offset_narracao)
+    audio_final = _mixar_musica_fundo(audio_com_sfx, duracao_total, volume=0.06)
     audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
     video_final = video_base.set_audio(audio_final)
@@ -1207,6 +1414,7 @@ def main():
         documento_estilo=config.get('documento_estilo', []),
         tipo_video=VIDEO_TYPE,
         gemini_generate_fn=_gemini_generate,
+        modo_roteiro=config.get('modo_roteiro', 'cadeia_completa'),
     )
     roteiro = pacote_roteiro['roteiro_texto']
     titulo_video = pacote_roteiro['titulo']
@@ -1227,11 +1435,50 @@ def main():
     audio_clip.close()
     print(f"⏱️ {duracao_narracao:.1f}s de narração")
 
-    termo = escolher_termo_pesquisa(tema, roteiro)
-    orientacao = 'portrait' if VIDEO_TYPE == 'short' else 'landscape'
+    # Fase 2: transcreve UMA VEZ aqui (cedo) e reaproveita em tudo que segue —
+    # mapeamento de bloco, legenda comum e destaque visual não retranscrevem.
+    print("🧠 Transcrevendo narração (relógio mestre para B-roll/legenda/destaque/SFX)...")
+    try:
+        palavras_tempo = transcrever_palavras_com_timestamps(audio_path)
+    except Exception as e:
+        print(f"⚠️ Falha na transcrição ({e}) — seguindo sem timestamps de palavra")
+        palavras_tempo = []
 
+    orientacao = 'portrait' if VIDEO_TYPE == 'short' else 'landscape'
     duracao_bloco_video = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
-    lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_bloco_video)
+
+    if palavras_tempo:
+        blocos_com_tempo = mapear_tempos_para_blocos(blocos_roteiro, palavras_tempo)
+
+        termos_validados = config.get('termos_pesquisa_validados', [])
+        print("🔍 Escolhendo termo de busca por bloco (B-roll casado com o que está sendo dito)...")
+        termos_por_bloco = escolher_termos_por_bloco(tema, blocos_com_tempo, termos_validados, _gemini_generate)
+        for bloco, termo_bloco in zip(blocos_com_tempo, termos_por_bloco):
+            bloco['termo'] = termo_bloco
+
+        lista_clipes = baixar_clipes_por_bloco(blocos_com_tempo, orientacao)
+
+        print("✨ Escolhendo palavras de destaque...")
+        destaques_por_bloco = escolher_palavras_destaque(blocos_com_tempo, _gemini_generate)
+        destaques_resolvidos = resolver_destaques_com_tempo(
+            roteiro, palavras_tempo, blocos_com_tempo, destaques_por_bloco
+        )
+        eventos_sfx = construir_timeline_sfx(blocos_com_tempo, destaques_resolvidos)
+
+        largura_legenda = 1080 if VIDEO_TYPE == 'short' else 1920
+        altura_legenda = 1920 if VIDEO_TYPE == 'short' else 1080
+        offset_legenda = SEGUNDOS_LEAD_IN  # intro (se houver, vídeo longo) soma dentro de criar_video_longo
+        clips_legenda = gerar_clips_legenda(roteiro, palavras_tempo, largura_legenda, altura_legenda,
+                                             offset=offset_legenda)
+        clips_destaque = gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos,
+                                               largura_legenda, altura_legenda, offset=offset_legenda)
+        termo = termos_por_bloco[0] if termos_por_bloco else ''  # usado só na busca de foto da thumbnail
+    else:
+        # sem timestamps não dá pra fazer nada da Fase 2 — cai pro comportamento antigo
+        # (1 termo pro vídeo inteiro, sem legenda/destaque/SFX sincronizados)
+        termo = escolher_termo_pesquisa(tema, roteiro)
+        lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_bloco_video)
+        clips_legenda, clips_destaque, eventos_sfx = [], [], []
 
     if not lista_clipes:
         print("❌ Nenhum clipe baixado — abortando este ciclo.")
@@ -1243,9 +1490,13 @@ def main():
     print("🎥 Montando vídeo...")
     try:
         if VIDEO_TYPE == 'short':
-            resultado = criar_video_curto(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
+            resultado = criar_video_curto(audio_path, roteiro, lista_clipes, video_path, duracao_narracao,
+                                           clips_legenda=clips_legenda, clips_destaque=clips_destaque,
+                                           eventos_sfx=eventos_sfx)
         else:
-            resultado = criar_video_longo(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
+            resultado = criar_video_longo(audio_path, roteiro, lista_clipes, video_path, duracao_narracao,
+                                           clips_legenda=clips_legenda, clips_destaque=clips_destaque,
+                                           eventos_sfx=eventos_sfx)
 
         if not resultado:
             print("❌ Erro ao criar vídeo")
