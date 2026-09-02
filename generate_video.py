@@ -479,8 +479,9 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
         print(f"  ℹ️ Roteiro tem {len(palavras_roteiro)} palavras, Whisper detectou {len(palavras_tempo)} "
               f"marcações de tempo — alinhando pelas {n} em comum (diferença pequena é normal)")
 
-    fontsize = max(28, int(largura / 18))
+    fontsize = max(24, int(largura / 24))  # menor — legenda de apoio, não protagonista
     largura_texto = int(largura * 0.85)
+    margem_inferior = int(altura * 0.08)
 
     clips = []
     i = 0
@@ -502,7 +503,7 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
                 size=(largura_texto, None),
                 align='center'
             )
-            txt_clip = txt_clip.set_position(('center', 'center'))
+            txt_clip = txt_clip.set_position(('center', altura - margem_inferior - txt_clip.h))
             txt_clip = txt_clip.set_start(offset + inicio_tempo)
             txt_clip = txt_clip.set_duration(max(0.3, fim_tempo - inicio_tempo))
             clips.append(txt_clip)
@@ -531,9 +532,9 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
     if not ATIVAR_DESTAQUE or not destaques_resolvidos:
         return []
 
-    fontsize = max(44, int(largura / 9))
+    fontsize = max(50, int(largura / 8))  # maior que a legenda — é o protagonista visual agora
     largura_texto = int(largura * 0.9)
-    pos_y_alvo = int(altura * 0.72)
+    pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
     clips = []
 
     for destaque in destaques_resolvidos:
@@ -559,11 +560,14 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
                 _, h_atual = escala(t)
                 return ('center', pos_y_alvo - h_atual // 2)
 
-            duracao = max(0.6, (destaque['fim'] - destaque['inicio']) + 0.3)
+            # duração mínima generosa: o pop (0.18s) + fade-out (0.2s) já consomem ~0.4s,
+            # então precisa sobrar tempo de fato "parado" e legível na tela — antes só tinha
+            # 0.6s de mínimo, quase tudo consumido pela própria transição de entrada/saída
+            duracao = max(1.3, (destaque['fim'] - destaque['inicio']) + 0.7)
             txt_clip = txt_clip.set_duration(duracao)
             txt_clip = txt_clip.resize(_escala).set_position(_posicao)
             txt_clip = txt_clip.set_start(offset + destaque['inicio'])
-            txt_clip = txt_clip.crossfadein(DURACAO_POP_DESTAQUE).crossfadeout(0.2)
+            txt_clip = txt_clip.crossfadein(DURACAO_POP_DESTAQUE).crossfadeout(0.25)
             clips.append(txt_clip)
         except Exception as e:
             print(f"  ⚠️ Erro ao gerar destaque '{destaque.get('texto')}': {e} — pulando")
@@ -859,6 +863,7 @@ def _montar_clips_pexels(lista_clipes, largura, altura):
     fade-out no mesmo intervalo.
     """
     clips_prontos = []
+    transicoes_aplicadas = 0
     for i, item in enumerate(lista_clipes):
         try:
             clip = _preparar_clip_pexels(item, largura, altura)
@@ -866,9 +871,13 @@ def _montar_clips_pexels(lista_clipes, largura, altura):
                 clip = clip.set_start(max(0, item['inicio'] - DURACAO_TRANSICAO))
                 clip = clip.crossfadein(DURACAO_TRANSICAO)
                 clips_prontos[-1] = clips_prontos[-1].crossfadeout(DURACAO_TRANSICAO)
+                transicoes_aplicadas += 1
             clips_prontos.append(clip)
         except Exception as e:
             print(f"  ⚠️ Erro ao preparar clipe {i}: {e}")
+    print(f"  🔀 {transicoes_aplicadas} transição(ões) de {DURACAO_TRANSICAO}s aplicada(s) entre "
+          f"{len(clips_prontos)} clipe(s) — 0 é normal se o vídeo não chegou a trocar de bloco "
+          f"(ex: teste com LIMITE_CLIPES_TESTE baixo, cobrindo só o 1º bloco)")
     return clips_prontos
 
 
@@ -900,12 +909,15 @@ def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
     """
     Fase 2 — camada de SFX orientada a evento, mesmo espírito de fallback gracioso do
     _mixar_musica_fundo: toca um som curto a cada troca de bloco (evento 'transicao')
-    e a cada destaque visual que aparece (evento 'destaque'). Se a pasta correspondente
-    não tiver arquivo, essa camada simplesmente não ativa — não quebra o vídeo.
+    e a cada destaque visual que aparece (evento 'destaque'). Se não achar arquivo,
+    essa camada simplesmente não ativa — não quebra o vídeo.
 
-    Preencha (efeitos curtos, licença livre — ex: CC0 do Freesound):
-        assets/sfx/transicao/*.mp3  (ex: whoosh curto, corte seco)
-        assets/sfx/destaque/*.mp3   (ex: pop, ping, impacto leve)
+    Estrutura recomendada (efeitos curtos, licença livre — ex: CC0 do Freesound):
+        assets/sfx/transicao/*.mp3|*.wav|*.ogg  (ex: whoosh curto, corte seco)
+        assets/sfx/destaque/*.mp3|*.wav|*.ogg   (ex: pop, ping, impacto leve)
+    Se essas subpastas não existirem/estiverem vazias, cai pra um pool único direto
+    em assets/sfx/*.* (compartilhado entre os dois tipos de evento) — pra não exigir
+    a estrutura de subpastas logo no primeiro teste.
     """
     if not ATIVAR_SFX or not eventos_sfx:
         return audio_base
@@ -913,14 +925,25 @@ def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
     import glob
     from moviepy.editor import AudioFileClip, CompositeAudioClip
 
-    bibliotecas = {}
-    for tipo in ('transicao', 'destaque'):
-        arquivos = glob.glob(f'{sfx_dir}/{tipo}/*.mp3') + glob.glob(f'{sfx_dir}/{tipo}/*.wav')
-        bibliotecas[tipo] = arquivos
+    extensoes = ('*.mp3', '*.wav', '*.ogg', '*.m4a')
+
+    def _listar(pasta):
+        arquivos = []
+        for ext in extensoes:
+            arquivos += glob.glob(f'{pasta}/{ext}')
+        return arquivos
+
+    bibliotecas = {tipo: _listar(f'{sfx_dir}/{tipo}') for tipo in ('transicao', 'destaque')}
 
     if not any(bibliotecas.values()):
-        print("  ℹ️ Nenhum SFX encontrado em assets/sfx/ — seguindo sem camada de som de eventos")
-        return audio_base
+        pool_flat = _listar(sfx_dir)
+        if pool_flat:
+            print(f"  ℹ️ Sem subpastas transicao/destaque — usando os {len(pool_flat)} "
+                  f"arquivo(s) soltos em {sfx_dir}/ como pool único pra ambos os eventos")
+            bibliotecas = {'transicao': pool_flat, 'destaque': pool_flat}
+        else:
+            print(f"  ℹ️ Nenhum SFX encontrado em {sfx_dir}/ — seguindo sem camada de som de eventos")
+            return audio_base
 
     camadas = [audio_base]
     aplicados = 0
@@ -933,6 +956,7 @@ def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
             sfx_clip = AudioFileClip(arquivo).set_start(offset + evento['tempo']).volumex(0.5)
             camadas.append(sfx_clip)
             aplicados += 1
+            print(f"    🔊 SFX '{evento['tipo']}' em t={evento['tempo']:.2f}s → {os.path.basename(arquivo)}")
         except Exception as e:
             print(f"  ⚠️ Erro ao carregar SFX '{arquivo}': {e}")
 
