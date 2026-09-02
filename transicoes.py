@@ -23,6 +23,9 @@ registrar em TRANSICOES_DISPONIVEIS lá embaixo — generate_video.py não preci
 mudar nada além de listar o nome no config.json (chave 'transicoes_video').
 """
 
+import glob
+import os
+
 import numpy as np
 
 
@@ -188,6 +191,84 @@ def transicao_shadow_wipe(clip_saida, clip_entrada, tempo_corte, duracao, direca
 
 
 # ============================================================
+# 5. LUMA MATTE — transições prontas baixadas (packs gratuitos), formato padrão
+#    de mercado (Premiere/DaVinci/CapCut): um vídeo em preto-e-branco que define
+#    a MÁSCARA da troca — onde está branco, a mídia nova aparece; onde está
+#    preto, a mídia antiga continua visível. Não precisa de canal alpha nem de
+#    codec especial: qualquer .mp4 comum em P&B já serve como máscara.
+# ============================================================
+
+def transicao_luma_video(clip_saida, clip_entrada, tempo_corte, duracao, caminho_mascara):
+    """
+    Aplica um vídeo-máscara (luma matte) como transição entre dois clipes — é assim
+    que a maioria dos "packs de transição" gratuitos da internet (Mixkit, Videezy,
+    Pixabay Videos, Videvo — busque "luma matte transition pack" ou "transition
+    overlay") funciona: baixa um .mp4 em preto-e-branco (ex: uma forma se espalhando,
+    um giro, um wipe orgânico) e usa o brilho de cada pixel como opacidade.
+
+    caminho_mascara: arquivo de vídeo P&B (quanto mais branco, mais visível o clipe
+    que entra). Se o arquivo tiver cor, a luminância é usada automaticamente.
+    """
+    from moviepy.editor import VideoFileClip
+
+    w, h = clip_saida.size
+    duracao_efetiva = min(duracao, 1.2)
+
+    mascara = VideoFileClip(caminho_mascara, audio=False).without_audio()
+    if mascara.duration < duracao_efetiva:
+        duracao_efetiva = mascara.duration
+    mascara = mascara.subclip(0, duracao_efetiva).resize((w, h))
+    mascara_alpha = mascara.to_mask()  # luminância (0=preto/transparente, 1=branco/opaco)
+
+    entrada = clip_entrada.set_start(max(0, tempo_corte - duracao_efetiva))
+    entrada = entrada.set_mask(mascara_alpha.set_start(0))
+    # o clipe de saída fica embaixo, visível onde a máscara está preta — sem alterar
+    saida = clip_saida
+    return saida, entrada
+
+
+def _nome_transicao_de_arquivo(caminho):
+    return os.path.splitext(os.path.basename(caminho))[0]
+
+
+def carregar_transicoes_customizadas(pasta='assets/transicoes'):
+    """
+    Escaneia `pasta` (padrão: assets/transicoes/) por arquivos .mp4/.mov/.webm — cada
+    arquivo vira uma transição nova, registrada com o NOME DO ARQUIVO (sem extensão)
+    pronta pra usar em config.json → 'transicoes_video': ["nome_do_arquivo", ...].
+
+    Uso: baixe um pack de luma-matte transitions gratuito (procure "free luma matte
+    transition pack" — Mixkit, Videezy e Pixabay Videos têm vários sem marca d'água),
+    jogue os .mp4 dentro de assets/transicoes/, e o nome de cada arquivo já vira uma
+    opção válida em 'transicoes_video' automaticamente — não precisa mexer em código
+    nem reiniciar nada além de rodar o pipeline de novo.
+
+    Se a pasta não existir ou estiver vazia, retorna {} — não quebra nada pra quem não
+    usa a funcionalidade.
+    """
+    extensoes = ('*.mp4', '*.mov', '*.webm', '*.MP4', '*.MOV', '*.WEBM')
+    arquivos = []
+    for ext in extensoes:
+        arquivos += glob.glob(os.path.join(pasta, ext))
+
+    customizadas = {}
+    for caminho in arquivos:
+        nome = _nome_transicao_de_arquivo(caminho)
+
+        def _fabrica(caminho_mascara=caminho):
+            def _transicao(clip_saida, clip_entrada, tempo_corte, duracao):
+                return transicao_luma_video(clip_saida, clip_entrada, tempo_corte, duracao, caminho_mascara)
+            return _transicao
+
+        customizadas[nome] = _fabrica()
+
+    if customizadas:
+        print(f"  🎞️ {len(customizadas)} transição(ões) customizada(s) carregada(s) de "
+              f"{pasta}/: {', '.join(customizadas.keys())}")
+    return customizadas
+
+
+# ============================================================
 # REGISTRO — nome usado no config.json ('transicoes_video': [...])
 # ============================================================
 
@@ -197,3 +278,4 @@ TRANSICOES_DISPONIVEIS = {
     'glitch': transicao_glitch,
     'shadow_wipe': transicao_shadow_wipe,
 }
+TRANSICOES_DISPONIVEIS.update(carregar_transicoes_customizadas())
