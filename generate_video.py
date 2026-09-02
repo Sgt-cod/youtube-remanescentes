@@ -125,9 +125,11 @@ DURACAO_POP_DESTAQUE = float(os.environ.get('DURACAO_POP_DESTAQUE', '0.18'))  # 
 
 # Tamanho da palavra-destaque: por padrão é largura_do_video / DESTAQUE_TAMANHO_DIVISOR
 # (divisor maior = texto menor). Ajustável em config.json ('fonte_destaque_divisor') sem
-# mexer em código — ex: 6 deixa bem maior que o padrão (8), 12 deixa bem menor.
+# mexer em código — ex: 6 deixa bem maior que o padrão (10), 14 deixa bem menor.
+# (Baixamos o padrão de 8 pra 10: em largura/8 o texto ficava grande demais em 1080px de
+# largura — 135px de fonte — forçando quebra feia mesmo em palavras curtas.)
 DESTAQUE_TAMANHO_DIVISOR = float(os.environ.get(
-    'DESTAQUE_TAMANHO_DIVISOR', config.get('fonte_destaque_divisor', 8)
+    'DESTAQUE_TAMANHO_DIVISOR', config.get('fonte_destaque_divisor', 10)
 ))
 # Override direto em pixels, se preferir controle absoluto em vez de proporcional à
 # largura do vídeo — deixe null/ausente em config.json pra usar o divisor acima.
@@ -547,18 +549,40 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
 
     # Tamanho controlável via config.json ('fonte_destaque_tamanho_px' ganha de tudo;
     # senão 'fonte_destaque_divisor', default 8 = largura/8, igual ao comportamento antigo).
+    # Tamanho controlável via config.json ('fonte_destaque_tamanho_px' ganha de tudo;
+    # senão 'fonte_destaque_divisor', default 8 = largura/8, igual ao comportamento antigo).
     fontsize_base = int(DESTAQUE_TAMANHO_PX) if DESTAQUE_TAMANHO_PX else max(50, int(largura / DESTAQUE_TAMANHO_DIVISOR))
     largura_texto = int(largura * 0.9)
     pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
     clips = []
 
+    def _fonte_pil_destaque(tamanho):
+        """Mesma lógica de fallback do _carregar_fonte_pil (thumbnail), mas pra
+        FONTE_DESTAQUE especificamente. Se FONTE_DESTAQUE for um caminho de arquivo
+        válido, usa ele; senão cai pras fontes de sistema conhecidas."""
+        if FONTE_DESTAQUE and os.path.exists(FONTE_DESTAQUE):
+            return ImageFont.truetype(FONTE_DESTAQUE, tamanho)
+        for caminho in _FONTE_TTF_CANDIDATOS:
+            if os.path.exists(caminho):
+                return ImageFont.truetype(caminho, tamanho)
+        return ImageFont.load_default()
+
+    _medidor_img = Image.new('RGB', (1, 1))
+    _medidor_draw = ImageDraw.Draw(_medidor_img)
+
     def _largura_renderizada(texto, tamanho):
-        """method='label' não quebra linha — serve só pra medir a largura real do texto
-        nesse fontsize/fonte, sem gastar tempo montando o clip 'caption' final."""
-        clip_medida = TextClip(texto, fontsize=tamanho, font=FONTE_DESTAQUE, method='label')
-        largura_medida = clip_medida.w
-        clip_medida.close()
-        return largura_medida
+        """BUGFIX (fonte gigante quebrando palavra no meio, ex: 'Resiliênci'/'a'):
+        a versão anterior media a largura chamando o ImageMagick (TextClip method='label')
+        — se isso falhar silenciosamente (fonte não encontrada pelo IM, erro de processo,
+        etc.), o except:pass deixava passar o fontsize_base gigante sem encolher nada.
+        Medir com PIL direto é mais confiável (mesma lib já usada na thumbnail, sem
+        depender de um subprocess do ImageMagick) e nunca lança silenciosamente — se a
+        fonte não existir, cai pro fallback de sistema em vez de quebrar a medição.
+        Aplica 12% de margem de segurança pra cobrir qualquer diferença fina de métrica
+        entre o PIL (medição) e o ImageMagick (render final do 'caption')."""
+        fonte = _fonte_pil_destaque(tamanho)
+        bbox = _medidor_draw.textbbox((0, 0), texto, font=fonte)
+        return int((bbox[2] - bbox[0]) * 1.12)
 
     for destaque in destaques_resolvidos:
         try:
@@ -569,17 +593,18 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
             # tamanho da palavra — em method='caption', se UMA palavra sozinha já é mais
             # larga que a caixa de texto, o ImageMagick quebra a palavra, não só a linha.
             # Medimos a palavra mais longa do destaque (não a frase toda, que pode
-            # legitimamente quebrar em várias palavras) e encolhemos o fontsize só o
-            # necessário pra ela caber inteira numa linha.
+            # legitimamente quebrar em várias palavras) e encolhemos o fontsize até ela
+            # caber inteira numa linha — em LOOP (não só uma estimativa de uma tentativa
+            # só), porque a relação largura/fontsize não é perfeitamente linear entre
+            # fontes/glifos diferentes, e uma única estimativa pode ainda estourar.
             fontsize = fontsize_base
-            try:
-                palavras = texto_upper.split()
-                palavra_mais_longa = max(palavras, key=len) if palavras else texto_upper
+            palavras = texto_upper.split()
+            palavra_mais_longa = max(palavras, key=len) if palavras else texto_upper
+            for _tentativa in range(6):
                 largura_palavra = _largura_renderizada(palavra_mais_longa, fontsize)
-                if largura_palavra > largura_texto:
-                    fontsize = max(28, int(fontsize * largura_texto / largura_palavra))
-            except Exception:
-                pass  # se a medição falhar, segue com fontsize_base — pior caso é o de antes
+                if largura_palavra <= largura_texto or fontsize <= 28:
+                    break
+                fontsize = max(28, int(fontsize * largura_texto / largura_palavra))
 
             txt_clip = TextClip(
                 texto_upper,
@@ -930,12 +955,16 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
 
 DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.7'))  # crossfade entre blocos, em segundos
 
-# Quanto antecipar o SFX de transição (woosh) em relação ao instante teórico do corte,
-# pra ele soar no MEIO do efeito visual em vez de no final dele. Ajustável via config.json
-# ('antecipacao_sfx_transicao') ou env var — 0.25s é um bom ponto de partida pra
-# DURACAO_TRANSICAO=0.7s; se trocar a duração da transição, vale reajustar isso também.
+# Quanto antecipar o SFX de transição (woosh) em relação ao instante teórico do corte
+# (tempo_corte). AJUSTE: o crossfade visual começa DURACAO_TRANSICAO segundos ANTES de
+# tempo_corte e só termina de aparecer NELE — um whoosh soa natural quando o INÍCIO do
+# som coincide com o INÍCIO do movimento visual, não com um ponto no meio do efeito.
+# Por isso o padrão agora é igual a DURACAO_TRANSICAO (som e crossfade começam juntos,
+# e terminam praticamente juntos também, já que o woosh.mp3 aparado tem ~0.6s de conteúdo
+# audível pra um crossfade de 0.7s). Ajustável via config.json ('antecipacao_sfx_transicao')
+# se quiser algo diferente — 0 desativa a antecipação (comportamento anterior ao fix).
 ANTECIPACAO_SFX_TRANSICAO = float(os.environ.get(
-    'ANTECIPACAO_SFX_TRANSICAO', config.get('antecipacao_sfx_transicao', 0.25)
+    'ANTECIPACAO_SFX_TRANSICAO', config.get('antecipacao_sfx_transicao', DURACAO_TRANSICAO)
 ))
 
 
