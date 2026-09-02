@@ -21,7 +21,10 @@ from producao_visual import (
     escolher_palavras_destaque,
     resolver_destaques_com_tempo,
     construir_timeline_sfx,
+    decidir_prints_de_noticia,
 )
+from transicoes import TRANSICOES_DISPONIVEIS, transicao_crossfade
+from mockups_visuais import gerar_print_noticia
 
 # ============================================================
 # Curadoria via Telegram (opcional)
@@ -532,15 +535,42 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
     if not ATIVAR_DESTAQUE or not destaques_resolvidos:
         return []
 
-    fontsize = max(50, int(largura / 8))  # maior que a legenda — é o protagonista visual agora
+    fontsize_base = max(50, int(largura / 8))  # maior que a legenda — é o protagonista visual agora
     largura_texto = int(largura * 0.9)
     pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
     clips = []
 
+    def _largura_renderizada(texto, tamanho):
+        """method='label' não quebra linha — serve só pra medir a largura real do texto
+        nesse fontsize/fonte, sem gastar tempo montando o clip 'caption' final."""
+        clip_medida = TextClip(texto, fontsize=tamanho, font=FONTE_DESTAQUE, method='label')
+        largura_medida = clip_medida.w
+        clip_medida.close()
+        return largura_medida
+
     for destaque in destaques_resolvidos:
         try:
+            texto_upper = destaque['texto'].upper()
+
+            # Ajusta o fontsize pra caber: a causa da quebra no meio da palavra (ex:
+            # "Resiliênci" numa linha, "a" na outra) é o fontsize fixo não considerar o
+            # tamanho da palavra — em method='caption', se UMA palavra sozinha já é mais
+            # larga que a caixa de texto, o ImageMagick quebra a palavra, não só a linha.
+            # Medimos a palavra mais longa do destaque (não a frase toda, que pode
+            # legitimamente quebrar em várias palavras) e encolhemos o fontsize só o
+            # necessário pra ela caber inteira numa linha.
+            fontsize = fontsize_base
+            try:
+                palavras = texto_upper.split()
+                palavra_mais_longa = max(palavras, key=len) if palavras else texto_upper
+                largura_palavra = _largura_renderizada(palavra_mais_longa, fontsize)
+                if largura_palavra > largura_texto:
+                    fontsize = max(28, int(fontsize * largura_texto / largura_palavra))
+            except Exception:
+                pass  # se a medição falhar, segue com fontsize_base — pior caso é o de antes
+
             txt_clip = TextClip(
-                destaque['texto'].upper(),
+                texto_upper,
                 fontsize=fontsize,
                 font=FONTE_DESTAQUE,
                 color=COR_DESTAQUE,
@@ -762,12 +792,34 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
           f"{DIAS_EVITAR_REPETICAO_PEXELS} dias (serão evitados)")
 
     todos_os_clipes = []
-    for bloco in blocos_com_tempo:
+    for i, bloco in enumerate(blocos_com_tempo):
         termo = bloco['termo']
         duracao_alvo = bloco['duracao']
         offset_bloco = bloco['inicio']
 
         print(f"  🎯 Bloco '{bloco['bloco']}' ({duracao_alvo:.1f}s) — termo: '{termo}'")
+
+        # Webdoc, opt-in via config.json ('usar_prints_noticia': true): em vez de buscar
+        # B-roll no Pexels pra esse bloco, gera um mockup de print de notícia (mockups_visuais.py)
+        # com a manchete decidida em decidir_prints_de_noticia(). Nada disso roda se a flag
+        # não estiver ligada — bloco.get() volta None e cai direto no fluxo antigo abaixo.
+        if bloco.get('usa_print_noticia'):
+            try:
+                caminho_print = gerar_print_noticia(
+                    manchete=bloco['manchete_noticia'],
+                    subtitulo=bloco.get('subtitulo_noticia'),
+                    output_path=f"{ASSETS_DIR}/prints/bloco_{i}.png",
+                )
+                todos_os_clipes.append({
+                    'path': caminho_print,
+                    'inicio': offset_bloco,
+                    'duracao': duracao_alvo,
+                    'transicao_bloco': True,
+                })
+                print(f"    📰 Print de notícia gerado: \"{bloco['manchete_noticia']}\"")
+                continue
+            except Exception as e:
+                print(f"    ⚠️ Falha ao gerar print de notícia ({e}) — caindo pro B-roll normal")
 
         tempo_coberto = 0.0
         pagina = 1
@@ -835,7 +887,32 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
 DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.7'))  # crossfade entre blocos, em segundos
 
 
+TRANSICOES_VIDEO = config.get('transicoes_video', ['crossfade'])  # ['crossfade','flash','glitch','shadow_wipe']
+
+
+def _clip_de_imagem_com_zoom(caminho_imagem, duracao, largura, altura, zoom_final=1.08):
+    """
+    Ken Burns simples (zoom lento e contínuo) pra imagens estáticas — usado pelos
+    prints de notícia gerados em mockups_visuais.py. Sem isso, uma imagem 100% parada
+    destoa visualmente do resto do B-roll (que sempre tem movimento de câmera real).
+    """
+    img_clip = ImageClip(caminho_imagem).set_duration(duracao)
+    if img_clip.w / img_clip.h > largura / altura:
+        img_clip = img_clip.resize(height=altura)
+    else:
+        img_clip = img_clip.resize(width=largura)
+
+    def _fator_zoom(t):
+        return 1 + (zoom_final - 1) * (t / duracao if duracao > 0 else 1)
+
+    img_clip = img_clip.resize(_fator_zoom).set_position('center')
+    return CompositeVideoClip([img_clip], size=(largura, altura)).set_duration(duracao)
+
+
 def _preparar_clip_pexels(item, largura, altura):
+    if item['path'].lower().endswith(('.png', '.jpg', '.jpeg')):
+        return _clip_de_imagem_com_zoom(item['path'], item['duracao'], largura, altura).set_start(item['inicio'])
+
     clip = VideoFileClip(item['path'])
     if clip.duration > item['duracao']:
         clip = clip.subclip(0, item['duracao'])
@@ -854,31 +931,48 @@ def _preparar_clip_pexels(item, largura, altura):
 def _montar_clips_pexels(lista_clipes, largura, altura):
     """
     Corte seco dentro do mesmo bloco (vídeo real já tem movimento próprio, não precisa
-    de transição). Crossfade suave (DURACAO_TRANSICAO) só na TROCA de bloco do roteiro —
-    é o que dá a sensação de "capítulo novo" em vez de só mais um corte de B-roll, sem
-    precisar de pacote de vídeos de transição (glitch/flash) externo.
-    Um crossfade de verdade precisa de SOBREPOSIÇÃO entre os dois clipes (não só um
-    fade-in isolado, que resultaria em fade-pro-preto): por isso o clipe que abre o
-    bloco novo tem o início antecipado em DURACAO_TRANSICAO, e o clipe anterior recebe
-    fade-out no mesmo intervalo.
+    de transição). Transição (crossfade ou outra, ver transicoes.py) só na TROCA de
+    bloco do roteiro — é o que dá a sensação de "capítulo novo" em vez de só mais um
+    corte de B-roll.
+    Qual transição usar é escolhida (aleatoriamente, se houver mais de uma) a partir da
+    lista em config.json 'transicoes_video' — default ['crossfade'] mantém o
+    comportamento antigo pra canais que não configuraram nada. Se a transição
+    escolhida falhar ao renderizar (efeito novo, mais frágil que o dissolve simples),
+    cai pro crossfade sem derrubar o vídeo inteiro.
     """
     clips_prontos = []
     transicoes_aplicadas = 0
+    contagem_por_tipo = {}
     for i, item in enumerate(lista_clipes):
         try:
             clip = _preparar_clip_pexels(item, largura, altura)
             if i > 0 and item.get('transicao_bloco') and clips_prontos:
-                clip = clip.set_start(max(0, item['inicio'] - DURACAO_TRANSICAO))
-                clip = clip.crossfadein(DURACAO_TRANSICAO)
-                clips_prontos[-1] = clips_prontos[-1].crossfadeout(DURACAO_TRANSICAO)
+                nome_transicao = random.choice(TRANSICOES_VIDEO) if TRANSICOES_VIDEO else 'crossfade'
+                funcao_transicao = TRANSICOES_DISPONIVEIS.get(nome_transicao, transicao_crossfade)
+                try:
+                    clip_anterior, clip = funcao_transicao(
+                        clips_prontos[-1], clip, item['inicio'], DURACAO_TRANSICAO
+                    )
+                except Exception as e:
+                    print(f"  ⚠️ Transição '{nome_transicao}' falhou ({e}) — usando crossfade")
+                    nome_transicao = 'crossfade'
+                    clip_anterior, clip = transicao_crossfade(
+                        clips_prontos[-1], clip, item['inicio'], DURACAO_TRANSICAO
+                    )
+                clips_prontos[-1] = clip_anterior
                 transicoes_aplicadas += 1
+                contagem_por_tipo[nome_transicao] = contagem_por_tipo.get(nome_transicao, 0) + 1
             clips_prontos.append(clip)
         except Exception as e:
             print(f"  ⚠️ Erro ao preparar clipe {i}: {e}")
+    resumo_tipos = ", ".join(f"{n}x {tipo}" for tipo, n in contagem_por_tipo.items())
     print(f"  🔀 {transicoes_aplicadas} transição(ões) de {DURACAO_TRANSICAO}s aplicada(s) entre "
-          f"{len(clips_prontos)} clipe(s) — 0 é normal se o vídeo não chegou a trocar de bloco "
-          f"(ex: teste com LIMITE_CLIPES_TESTE baixo, cobrindo só o 1º bloco)")
+          f"{len(clips_prontos)} clipe(s)" + (f" ({resumo_tipos})" if resumo_tipos else "") +
+          " — 0 é normal se o vídeo não chegou a trocar de bloco "
+          "(ex: teste com LIMITE_CLIPES_TESTE baixo, cobrindo só o 1º bloco)")
     return clips_prontos
+
+
 
 
 def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir='assets/musicas'):
@@ -982,6 +1076,23 @@ def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_na
     if not clips_video:
         return None
 
+    # BUGFIX: os itens de lista_clipes vêm com tempo relativo ao INÍCIO DA NARRAÇÃO
+    # (0s = primeira palavra falada), mas a narração de verdade só começa em
+    # SEGUNDOS_LEAD_IN dentro do vídeo final. Sem este deslocamento, cada troca de
+    # mídia (e o SFX de transição, que já soma esse offset corretamente em
+    # aplicar_sfx) acontecia SEGUNDOS_LEAD_IN segundos ANTES do corte visual real —
+    # por isso o woosh soava "no meio da mídia" em vez de na troca.
+    clips_video = [c.set_start(c.start + SEGUNDOS_LEAD_IN) for c in clips_video]
+
+    # O 1º clipe cobria [0, SEGUNDOS_LEAD_IN) antes deste deslocamento — era o
+    # próprio "lead-in" visual antes da narração começar. Puxamos ele de volta pro
+    # instante 0 (mesma técnica já usada abaixo pro ÚLTIMO clipe, que é esticado
+    # pra cobrir o tail): mantém o vídeo cobrindo o início sem tela preta.
+    primeiro = clips_video[0]
+    if primeiro.start > 0:
+        gap_inicial = primeiro.start
+        clips_video[0] = primeiro.set_start(0).set_duration(primeiro.duration + gap_inicial)
+
     ultimo = clips_video[-1]
     cobertura = ultimo.start + ultimo.duration
     if cobertura < duracao_total:
@@ -1040,7 +1151,22 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
     duracao_total = intro_duracao + duracao_bloco
 
     clips_video = _montar_clips_pexels(lista_clipes, 1920, 1080)
-    clips_video = [c.set_start(c.start + intro_duracao) for c in clips_video]
+    # BUGFIX real (era o culpado do woosh desalinhado): faltava somar SEGUNDOS_LEAD_IN
+    # aqui — só a intro estava sendo compensada. lista_clipes vem em tempo relativo ao
+    # início da narração, mas a narração só começa em intro_duracao + SEGUNDOS_LEAD_IN
+    # no vídeo final (ver offset_narracao mais abaixo, usado pro áudio e pro SFX).
+    # Sem os dois offsets aqui, cada corte de mídia acontecia SEGUNDOS_LEAD_IN segundos
+    # adiantado em relação ao evento de SFX/narração correspondente.
+    clips_video = [c.set_start(c.start + intro_duracao + SEGUNDOS_LEAD_IN) for c in clips_video]
+
+    # O 1º clipe cobria [intro_duracao, intro_duracao + SEGUNDOS_LEAD_IN) antes deste
+    # deslocamento — o lead-in visual logo após a intro. Puxamos ele de volta (mesma
+    # técnica já usada abaixo pro ÚLTIMO clipe, esticado pra cobrir o tail).
+    if clips_video:
+        primeiro = clips_video[0]
+        if primeiro.start > intro_duracao:
+            gap_inicial = primeiro.start - intro_duracao
+            clips_video[0] = primeiro.set_start(intro_duracao).set_duration(primeiro.duration + gap_inicial)
 
     # BUGFIX: clips_legenda e clips_destaque chegam do main() com o tempo já calculado
     # em cima da narração (offset = SEGUNDOS_LEAD_IN), mas sem saber a duração da intro
@@ -1501,6 +1627,13 @@ def main():
         termos_por_bloco = escolher_termos_por_bloco(tema, blocos_com_tempo, termos_validados, _gemini_generate)
         for bloco, termo_bloco in zip(blocos_com_tempo, termos_por_bloco):
             bloco['termo'] = termo_bloco
+
+        # Webdoc, opt-in via config.json ('usar_prints_noticia': true) — inerte pro canal
+        # atual, que não tem essa chave. Ver producao_visual.decidir_prints_de_noticia.
+        blocos_com_tempo = decidir_prints_de_noticia(
+            blocos_com_tempo, _gemini_generate,
+            usar_prints_noticia=config.get('usar_prints_noticia', False)
+        )
 
         lista_clipes = baixar_clipes_por_bloco(blocos_com_tempo, orientacao)
 
