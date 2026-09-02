@@ -385,3 +385,6 @@
   "hashtag_conteudo": "reflexao",
   "idioma_gtts": "pt-br"
 }
+{
+  "transicoes_video": ["flash", "shadow_wipe", "glitch"]
+}
