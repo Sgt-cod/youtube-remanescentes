@@ -123,6 +123,16 @@ COR_DESTAQUE = os.environ.get('COR_DESTAQUE', config.get('cor_destaque', '#FFD24
 FONTE_DESTAQUE = os.environ.get('FONTE_DESTAQUE', config.get('fonte_destaque_arquivo', config.get('fonte_destaque_nome', LEGENDA_FONTE)))
 DURACAO_POP_DESTAQUE = float(os.environ.get('DURACAO_POP_DESTAQUE', '0.18'))  # tempo do "estalo" de entrada
 
+# Tamanho da palavra-destaque: por padrão é largura_do_video / DESTAQUE_TAMANHO_DIVISOR
+# (divisor maior = texto menor). Ajustável em config.json ('fonte_destaque_divisor') sem
+# mexer em código — ex: 6 deixa bem maior que o padrão (8), 12 deixa bem menor.
+DESTAQUE_TAMANHO_DIVISOR = float(os.environ.get(
+    'DESTAQUE_TAMANHO_DIVISOR', config.get('fonte_destaque_divisor', 8)
+))
+# Override direto em pixels, se preferir controle absoluto em vez de proporcional à
+# largura do vídeo — deixe null/ausente em config.json pra usar o divisor acima.
+DESTAQUE_TAMANHO_PX = config.get('fonte_destaque_tamanho_px')
+
 # Fonte da thumbnail: caminho direto do arquivo .ttf no repositório (PIL carrega o arquivo
 # diretamente, não precisa estar instalada no sistema).
 FONTE_THUMBNAIL_ARQUIVO = config.get('fonte_thumbnail_arquivo', '')
@@ -535,7 +545,9 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
     if not ATIVAR_DESTAQUE or not destaques_resolvidos:
         return []
 
-    fontsize_base = max(50, int(largura / 8))  # maior que a legenda — é o protagonista visual agora
+    # Tamanho controlável via config.json ('fonte_destaque_tamanho_px' ganha de tudo;
+    # senão 'fonte_destaque_divisor', default 8 = largura/8, igual ao comportamento antigo).
+    fontsize_base = int(DESTAQUE_TAMANHO_PX) if DESTAQUE_TAMANHO_PX else max(50, int(largura / DESTAQUE_TAMANHO_DIVISOR))
     largura_texto = int(largura * 0.9)
     pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
     clips = []
@@ -771,6 +783,24 @@ def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
     return clipes
 
 
+def _duracao_real_arquivo(caminho):
+    """ffprobe rápido (só lê o cabeçalho/container, não decodifica frames) pra pegar a
+    duração REAL de um arquivo de vídeo já baixado — usado como teto de segurança contra
+    o metadado 'duration' da API do Pexels divergir da variante de arquivo baixada.
+    Retorna None se ffprobe falhar/não estiver disponível — nesse caso o código volta a
+    confiar só no metadado da API (comportamento antigo), sem quebrar o vídeo."""
+    import subprocess
+    try:
+        resultado = subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+             '-of', 'default=noprint_wrappers=1:nokey=1', caminho],
+            capture_output=True, text=True, timeout=10
+        )
+        return float(resultado.stdout.strip())
+    except Exception:
+        return None
+
+
 def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
     """
     Fase 2 — B-roll casado por BLOCO do roteiro, não pelo vídeo inteiro: cada bloco
@@ -859,7 +889,21 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
                     continue
 
                 usados_no_video.add(video_id)
+                # BUGFIX (tela preta ~1s na transição): a duração que a API do Pexels
+                # informa ('duration' no JSON) é do vídeo mestre, não necessariamente da
+                # variante/resolução específica que baixamos em 'arquivo['link']' — quando
+                # elas divergem, o clipe real acaba mais curto que o previsto e o próximo
+                # corte fica agendado tarde demais, deixando um vão sem nada desenhado
+                # (preto) entre o fim do clipe real e o início do próximo. Medimos a
+                # duração REAL do arquivo já em disco (ffprobe, rápido, não decodifica
+                # o vídeo inteiro) e usamos ela como teto — nunca confiamos só no metadado.
+                duracao_real = _duracao_real_arquivo(destino)
                 duracao_disponivel = video.get('duration', 6)
+                if duracao_real is not None and duracao_real < duracao_disponivel:
+                    print(f"    ℹ️ Duração real do arquivo ({duracao_real:.2f}s) menor que "
+                          f"a informada pela API ({duracao_disponivel:.2f}s) — usando a real "
+                          f"pra não deixar vão preto na transição")
+                    duracao_disponivel = duracao_real
                 duracao_uso = min(duracao_disponivel, DURACAO_MAXIMA_CLIPE, duracao_alvo - tempo_coberto)
 
                 todos_os_clipes.append({
@@ -885,6 +929,14 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
 # ============================================================
 
 DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.7'))  # crossfade entre blocos, em segundos
+
+# Quanto antecipar o SFX de transição (woosh) em relação ao instante teórico do corte,
+# pra ele soar no MEIO do efeito visual em vez de no final dele. Ajustável via config.json
+# ('antecipacao_sfx_transicao') ou env var — 0.25s é um bom ponto de partida pra
+# DURACAO_TRANSICAO=0.7s; se trocar a duração da transição, vale reajustar isso também.
+ANTECIPACAO_SFX_TRANSICAO = float(os.environ.get(
+    'ANTECIPACAO_SFX_TRANSICAO', config.get('antecipacao_sfx_transicao', 0.25)
+))
 
 
 TRANSICOES_VIDEO = config.get('transicoes_video', ['crossfade'])  # ['crossfade','flash','glitch','shadow_wipe']
@@ -1047,7 +1099,16 @@ def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
             continue
         arquivo = random.choice(arquivos)
         try:
-            sfx_clip = AudioFileClip(arquivo).set_start(offset + evento['tempo']).volumex(0.5)
+            # BUGFIX (woosh "atrasado"): o corte visual (crossfade) começa
+            # DURACAO_TRANSICAO segundos ANTES do instante 'tempo' e só termina de
+            # aparecer NO instante 'tempo' — se o SFX toca exatamente em 'tempo', o
+            # olho já viu a imagem mudando bem antes do ouvido ouvir o whoosh. Disparamos
+            # o SFX de transição um pouco mais cedo (ANTECIPACAO_SFX_TRANSICAO) pra ele
+            # coincidir com o MEIO do efeito visual em vez do final. Não se aplica ao
+            # 'destaque' (mouse-click), que já está sincronizado corretamente.
+            antecipacao = ANTECIPACAO_SFX_TRANSICAO if evento['tipo'] == 'transicao' else 0.0
+            inicio_sfx = max(0.0, offset + evento['tempo'] - antecipacao)
+            sfx_clip = AudioFileClip(arquivo).set_start(inicio_sfx).volumex(0.5)
             camadas.append(sfx_clip)
             aplicados += 1
             print(f"    🔊 SFX '{evento['tipo']}' em t={evento['tempo']:.2f}s → {os.path.basename(arquivo)}")
