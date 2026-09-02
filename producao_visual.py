@@ -127,6 +127,69 @@ cada termo EXATAMENTE como aparece na lista:
     return resultado
 
 
+    return resultado
+
+
+# ============================================================
+# 2.1 PRINTS DE NOTÍCIA (WEBDOC) — opt-in via config.json 'usar_prints_noticia'
+# ============================================================
+
+def decidir_prints_de_noticia(blocos_com_tempo, gemini_generate_fn, usar_prints_noticia=False):
+    """
+    Fase 3 — SÓ roda se usar_prints_noticia=True (o canal atual de reflexão não passa
+    essa flag, então isso fica completamente inerte pra ele).
+    Pensado pra webdocs (história, ciência, economia): pergunta ao Gemini quais blocos
+    do roteiro descrevem algo que teria virado manchete de jornal — e só esses blocos
+    recebem 'usa_print_noticia'=True + uma manchete/subtítulo curtos, gerados a partir
+    do próprio texto do bloco (não busca notícia real nenhuma, evita problema de
+    direito de imagem — ver mockups_visuais.py).
+    Retorna a MESMA lista blocos_com_tempo, só com esses campos adicionados nos blocos
+    escolhidos. Se falhar ou a flag estiver desligada, devolve a lista sem alterações.
+    """
+    if not usar_prints_noticia:
+        return blocos_com_tempo
+
+    blocos_prompt = "\n".join(
+        f"[{i}] ({b['bloco']}): {b['texto']}" for i, b in enumerate(blocos_com_tempo)
+    )
+
+    prompt = f"""Analise os blocos de um roteiro de vídeo abaixo e identifique SÓ os blocos
+que descrevem um fato, evento ou dado que faria sentido ilustrar com um "print de
+notícia" (uma manchete de jornal genérica) — não use isso pra blocos de abertura,
+reflexão pessoal, opinião ou fechamento, só pra fatos/eventos concretos. Seja seletivo:
+no máximo 1 a cada 3 blocos deve receber isso, a maioria dos vídeos não deve ter nenhum.
+
+BLOCOS:
+{blocos_prompt}
+
+Para cada bloco escolhido, escreva uma manchete curta (até 10 palavras, estilo jornal,
+em CAIXA ALTA) e um subtítulo de uma frase — baseados SÓ no que o bloco já diz, sem
+inventar fatos novos.
+
+Retorne APENAS JSON:
+{{"escolhidos": [{{"indice": 0, "manchete": "...", "subtitulo": "..."}}]}}
+Se nenhum bloco se encaixar, retorne {{"escolhidos": []}}."""
+
+    try:
+        resposta = gemini_generate_fn(prompt)
+        escolhidos = _extrair_json(resposta.text).get('escolhidos', [])
+    except Exception as e:
+        print(f"  ⚠️ Falha ao decidir prints de notícia ({e}) — nenhum bloco vai usar")
+        escolhidos = []
+
+    for item in escolhidos:
+        i = item.get('indice')
+        if isinstance(i, int) and 0 <= i < len(blocos_com_tempo) and item.get('manchete'):
+            blocos_com_tempo[i]['usa_print_noticia'] = True
+            blocos_com_tempo[i]['manchete_noticia'] = item['manchete'].strip()
+            blocos_com_tempo[i]['subtitulo_noticia'] = (item.get('subtitulo') or '').strip()
+
+    if escolhidos:
+        print(f"  📰 {len(escolhidos)} bloco(s) vão usar print de notícia")
+
+    return blocos_com_tempo
+
+
 # ============================================================
 # 3. PALAVRAS DE DESTAQUE + RESOLUÇÃO DE TIMESTAMP
 # ============================================================
