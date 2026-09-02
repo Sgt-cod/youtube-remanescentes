@@ -117,6 +117,8 @@ INSTRUCAO_EXTRA_ROTEIRO = config.get('instrucao_extra_roteiro', '')
 # Liberation Sans Bold é o padrão livre, geralmente já vem instalado no runner sem esforço extra.
 LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', config.get('fonte_legenda_nome', 'Liberation-Sans-Bold'))
 COR_DESTAQUE = os.environ.get('COR_DESTAQUE', config.get('cor_destaque', '#FFD24D'))  # Fase 2: texto de destaque
+FONTE_DESTAQUE = os.environ.get('FONTE_DESTAQUE', config.get('fonte_destaque_arquivo', config.get('fonte_destaque_nome', LEGENDA_FONTE)))
+DURACAO_POP_DESTAQUE = float(os.environ.get('DURACAO_POP_DESTAQUE', '0.18'))  # tempo do "estalo" de entrada
 
 # Fonte da thumbnail: caminho direto do arquivo .ttf no repositório (PIL carrega o arquivo
 # diretamente, não precisa estar instalada no sistema).
@@ -519,17 +521,19 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
 
 def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura, altura, offset=0.0):
     """
-    Fase 2: texto de destaque — diferente da legenda comum (gerar_clips_legenda), isso é
-    o "grito visual" tipo webdoc: só a palavra/expressão marcada como importante, maior,
-    em cor de destaque, posicionada no terço inferior, aparecendo exatamente no timestamp
-    em que a palavra é falada (destaques_resolvidos já vem com o tempo resolvido por
-    producao_visual.resolver_destaques_com_tempo).
+    Fase 2 — texto de destaque: diferente da legenda comum, isso é o "grito visual" tipo
+    webdoc — só a palavra/expressão marcada como importante, maior, em cor de destaque,
+    aparecendo exatamente no timestamp em que é falada.
+    Efeito de entrada/saída (não é só fade): o texto nasce a 70% do tamanho e "estala" até
+    100% em DURACAO_POP_DESTAQUE segundos (efeito pop), combinado com fade in/out — testado
+    isoladamente antes de entrar aqui, renderiza sem erro mesmo com ImageMagick padrão.
     """
     if not ATIVAR_DESTAQUE or not destaques_resolvidos:
         return []
 
     fontsize = max(44, int(largura / 9))
     largura_texto = int(largura * 0.9)
+    pos_y_alvo = int(altura * 0.72)
     clips = []
 
     for destaque in destaques_resolvidos:
@@ -537,7 +541,7 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
             txt_clip = TextClip(
                 destaque['texto'].upper(),
                 fontsize=fontsize,
-                font=LEGENDA_FONTE,
+                font=FONTE_DESTAQUE,
                 color=COR_DESTAQUE,
                 stroke_color='black',
                 stroke_width=max(2, fontsize // 14),
@@ -545,16 +549,27 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
                 size=(largura_texto, None),
                 align='center'
             )
-            txt_clip = txt_clip.set_position(('center', int(altura * 0.72)))
-            txt_clip = txt_clip.set_start(offset + destaque['inicio'])
+            w0, h0 = txt_clip.size
+
+            def _escala(t, w0=w0, h0=h0):
+                fator = 0.7 + 0.3 * min(t / DURACAO_POP_DESTAQUE, 1.0)
+                return (max(1, int(w0 * fator)), max(1, int(h0 * fator)))
+
+            def _posicao(t, pos_y_alvo=pos_y_alvo, escala=_escala):
+                _, h_atual = escala(t)
+                return ('center', pos_y_alvo - h_atual // 2)
+
             duracao = max(0.6, (destaque['fim'] - destaque['inicio']) + 0.3)
-            txt_clip = txt_clip.set_duration(duracao).crossfadein(0.15)
+            txt_clip = txt_clip.set_duration(duracao)
+            txt_clip = txt_clip.resize(_escala).set_position(_posicao)
+            txt_clip = txt_clip.set_start(offset + destaque['inicio'])
+            txt_clip = txt_clip.crossfadein(DURACAO_POP_DESTAQUE).crossfadeout(0.2)
             clips.append(txt_clip)
         except Exception as e:
             print(f"  ⚠️ Erro ao gerar destaque '{destaque.get('texto')}': {e} — pulando")
 
     if clips:
-        print(f"✨ {len(clips)} destaque(s) visual(is) gerado(s)")
+        print(f"✨ {len(clips)} destaque(s) visual(is) gerado(s) (efeito pop + fade in/out)")
     return clips
 
 
@@ -813,7 +828,7 @@ def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
 # MONTAGEM DE VÍDEO
 # ============================================================
 
-DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.5'))  # crossfade entre blocos, em segundos
+DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.7'))  # crossfade entre blocos, em segundos
 
 
 def _preparar_clip_pexels(item, largura, altura):
@@ -1002,6 +1017,13 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
 
     clips_video = _montar_clips_pexels(lista_clipes, 1920, 1080)
     clips_video = [c.set_start(c.start + intro_duracao) for c in clips_video]
+
+    # BUGFIX: clips_legenda e clips_destaque chegam do main() com o tempo já calculado
+    # em cima da narração (offset = SEGUNDOS_LEAD_IN), mas sem saber a duração da intro
+    # (que só existe aqui dentro). Sem este deslocamento, eles tocavam `intro_duracao`
+    # segundos adiantados — exatamente a dessincronia relatada.
+    clips_legenda = [c.set_start(c.start + intro_duracao) for c in clips_legenda]
+    clips_destaque = [c.set_start(c.start + intro_duracao) for c in clips_destaque]
 
     if clips_video:
         ultimo = clips_video[-1]
@@ -1467,7 +1489,7 @@ def main():
 
         largura_legenda = 1080 if VIDEO_TYPE == 'short' else 1920
         altura_legenda = 1920 if VIDEO_TYPE == 'short' else 1080
-        offset_legenda = SEGUNDOS_LEAD_IN  # intro (se houver, vídeo longo) soma dentro de criar_video_longo
+        offset_legenda = SEGUNDOS_LEAD_IN  # NÃO inclui intro — quem soma intro_duracao é criar_video_longo
         clips_legenda = gerar_clips_legenda(roteiro, palavras_tempo, largura_legenda, altura_legenda,
                                              offset=offset_legenda)
         clips_destaque = gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos,
