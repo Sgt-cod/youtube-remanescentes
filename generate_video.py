@@ -556,6 +556,11 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
     pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
     clips = []
 
+    # Ordenado por instante de início — necessário pro fix de sobreposição abaixo, que
+    # precisa saber quando o PRÓXIMO destaque começa pra evitar dois textos na tela
+    # ao mesmo tempo, na mesma posição central.
+    destaques_ordenados = sorted(destaques_resolvidos, key=lambda d: d['inicio'])
+
     def _fonte_pil_destaque(tamanho):
         """Mesma lógica de fallback do _carregar_fonte_pil (thumbnail), mas pra
         FONTE_DESTAQUE especificamente. Se FONTE_DESTAQUE for um caminho de arquivo
@@ -584,7 +589,7 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
         bbox = _medidor_draw.textbbox((0, 0), texto, font=fonte)
         return int((bbox[2] - bbox[0]) * 1.12)
 
-    for destaque in destaques_resolvidos:
+    for idx, destaque in enumerate(destaques_ordenados):
         try:
             texto_upper = destaque['texto'].upper()
 
@@ -631,6 +636,17 @@ def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura,
             # então precisa sobrar tempo de fato "parado" e legível na tela — antes só tinha
             # 0.6s de mínimo, quase tudo consumido pela própria transição de entrada/saída
             duracao = max(1.3, (destaque['fim'] - destaque['inicio']) + 0.7)
+
+            # BUGFIX (destaque sobrepondo o outro, ex: "tribulação" ainda na tela quando
+            # "perseverança" começa): as duas palavras são desenhadas na MESMA posição
+            # central — se a duração de uma ultrapassa o início da próxima, elas empilham
+            # visualmente. Limitamos pelo início do próximo destaque, com uma folga de
+            # 0.15s pra garantir que um sai antes do outro entrar. Piso de 0.45s porque é
+            # o mínimo pro pop-in (0.18s) + fade-out (0.25s) ainda renderizarem direito.
+            if idx + 1 < len(destaques_ordenados):
+                espaco_disponivel = destaques_ordenados[idx + 1]['inicio'] - destaque['inicio'] - 0.15
+                duracao = max(0.45, min(duracao, espaco_disponivel))
+
             txt_clip = txt_clip.set_duration(duracao)
             txt_clip = txt_clip.resize(_escala).set_position(_posicao)
             txt_clip = txt_clip.set_start(offset + destaque['inicio'])
