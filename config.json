@@ -384,6 +384,6 @@
   "texto_inscricao": "🔔 Inscreva-se para reflexões diárias!",
   "hashtag_conteudo": "reflexao",
   "idioma_gtts": "pt-br",
-  "transicoes_video": ["flash", "shadow_wipe", "glitch"],
+  "transicoes_video": ["flash", "shadow_wipe", "glitch", "absorver", "passar", "derramar", "explosão-tinta"],
   "fonte_destaque_arquivo": "assets/fonts/RoadRage-Regular.ttf"
 }
