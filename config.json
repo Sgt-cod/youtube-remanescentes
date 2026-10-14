@@ -75,7 +75,8 @@
   ],
   "correcoes_pronuncia": {
     "fascinante": "fassinante",
-    "minuto": "minutu"
+    "minuto": "minutu",
+    "minutos": "minutus"
   },
   "idioma_conteudo": "português do Brasil",
   "idioma_whisper": "pt",
