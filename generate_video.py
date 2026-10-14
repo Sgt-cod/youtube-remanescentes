@@ -14,18 +14,6 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-from roteiro_engine import gerar_pacote_roteiro
-from producao_visual import (
-    mapear_tempos_para_blocos,
-    escolher_termos_por_bloco,
-    escolher_palavras_destaque,
-    resolver_destaques_com_tempo,
-    construir_timeline_sfx,
-    decidir_prints_de_noticia,
-)
-from transicoes import TRANSICOES_DISPONIVEIS, transicao_crossfade
-from mockups_visuais import gerar_print_noticia
-
 # ============================================================
 # Curadoria via Telegram (opcional)
 # ============================================================
@@ -80,9 +68,6 @@ DURACAO_MAXIMA_CLIPE = float(os.environ.get('DURACAO_MAXIMA_CLIPE', '20'))
 
 # ── Legenda automática ───────────────────────────────────────────────────────
 ATIVAR_LEGENDA = os.environ.get('ATIVAR_LEGENDA', 'true').lower() == 'true'
-ATIVAR_DESTAQUE = os.environ.get('ATIVAR_DESTAQUE', 'true').lower() == 'true'  # Fase 2: texto de destaque
-ATIVAR_SFX = os.environ.get('ATIVAR_SFX', 'true').lower() == 'true'  # Fase 2: SFX de transição/destaque
-MAX_PAGINAS_BLOCO = int(os.environ.get('MAX_PAGINAS_BLOCO', '3'))  # páginas Pexels por bloco (não por vídeo)
 # LEGENDA_FONTE é definida logo após o carregamento do config.json (precisa do config.get(...))
 
 genai.configure(api_key=GEMINI_API_KEY)
@@ -109,6 +94,14 @@ def _gemini_generate(prompt, tentativas=3, espera=15):
 with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
     config = json.load(f)
 
+# Overrides por tipo de vídeo: permite que 'long' e 'short' do MESMO repositório tenham nicho,
+# temas, thumbnail etc. diferentes. Qualquer campo dentro de config["por_tipo"][VIDEO_TYPE]
+# substitui o campo de mesmo nome do config base. Sem "por_tipo", nada muda.
+_overrides_tipo = config.get('por_tipo', {}).get(VIDEO_TYPE, {})
+if _overrides_tipo:
+    config.update(_overrides_tipo)
+    print(f"⚙️ Config: {len(_overrides_tipo)} campo(s) sobrescrito(s) para o tipo '{VIDEO_TYPE}'")
+
 # Idioma do conteúdo gerado (roteiro, título, thumbnail) — mude só isso no config.json
 # pra clonar o canal em outro idioma, sem tocar no código.
 IDIOMA_CONTEUDO = config.get('idioma_conteudo', 'português do Brasil')
@@ -119,21 +112,6 @@ INSTRUCAO_EXTRA_ROTEIRO = config.get('instrucao_extra_roteiro', '')
 # no runner — veja o step do .yml que instala as fontes de fonts/ no sistema).
 # Liberation Sans Bold é o padrão livre, geralmente já vem instalado no runner sem esforço extra.
 LEGENDA_FONTE = os.environ.get('LEGENDA_FONTE', config.get('fonte_legenda_nome', 'Liberation-Sans-Bold'))
-COR_DESTAQUE = os.environ.get('COR_DESTAQUE', config.get('cor_destaque', '#FFD24D'))  # Fase 2: texto de destaque
-FONTE_DESTAQUE = os.environ.get('FONTE_DESTAQUE', config.get('fonte_destaque_arquivo', config.get('fonte_destaque_nome', LEGENDA_FONTE)))
-DURACAO_POP_DESTAQUE = float(os.environ.get('DURACAO_POP_DESTAQUE', '0.18'))  # tempo do "estalo" de entrada
-
-# Tamanho da palavra-destaque: por padrão é largura_do_video / DESTAQUE_TAMANHO_DIVISOR
-# (divisor maior = texto menor). Ajustável em config.json ('fonte_destaque_divisor') sem
-# mexer em código — ex: 6 deixa bem maior que o padrão (10), 14 deixa bem menor.
-# (Baixamos o padrão de 8 pra 10: em largura/8 o texto ficava grande demais em 1080px de
-# largura — 135px de fonte — forçando quebra feia mesmo em palavras curtas.)
-DESTAQUE_TAMANHO_DIVISOR = float(os.environ.get(
-    'DESTAQUE_TAMANHO_DIVISOR', config.get('fonte_destaque_divisor', 10)
-))
-# Override direto em pixels, se preferir controle absoluto em vez de proporcional à
-# largura do vídeo — deixe null/ausente em config.json pra usar o divisor acima.
-DESTAQUE_TAMANHO_PX = config.get('fonte_destaque_tamanho_px')
 
 # Fonte da thumbnail: caminho direto do arquivo .ttf no repositório (PIL carrega o arquivo
 # diretamente, não precisa estar instalada no sistema).
@@ -186,8 +164,10 @@ Responda em {IDIOMA_CONTEUDO}, APENAS com o nome do tema, curto."""
 
 
 def gerar_titulo(tema):
+    instrucao_titulo = config.get('instrucao_titulo', '')
+    linha_titulo = f"\nRegra adicional OBRIGATÓRIA: {instrucao_titulo}" if instrucao_titulo else ""
     prompt = f"""Baseado no tema de {CONTEXTO_NICHO} "{tema}", crie um título de vídeo curto e
-chamativo para YouTube (estilo motivacional/inspiracional), em {IDIOMA_CONTEUDO}.
+chamativo para YouTube (estilo motivacional/inspiracional), em {IDIOMA_CONTEUDO}.{linha_titulo}
 
 Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
@@ -206,11 +186,15 @@ Retorne APENAS JSON: {{"titulo": "título aqui"}}"""
 
 def gerar_roteiro(tema, tipo_video):
     if tipo_video == 'short':
-        palavras_alvo = 180
-        duracao_desc = '60-90 segundos'
+        palavras_alvo = config.get('palavras_alvo', 180)
+        duracao_desc = config.get('duracao_desc', '60-90 segundos')
     else:
-        palavras_alvo = 650
-        duracao_desc = '4-5 minutos'
+        palavras_alvo = config.get('palavras_alvo', 650)
+        duracao_desc = config.get('duracao_desc', '4-5 minutos')
+
+    instrucao_final = config.get(
+        'instrucao_final_roteiro',
+        'Termine com uma mensagem de esperança/encorajamento prática para o dia a dia')
 
     linha_extra = f"\n- {INSTRUCAO_EXTRA_ROTEIRO}" if INSTRUCAO_EXTRA_ROTEIRO else ""
 
@@ -221,7 +205,7 @@ REGRAS OBRIGATÓRIAS:
 - Escreva em {IDIOMA_CONTEUDO}
 - Duração alvo: {duracao_desc} de narração (~{palavras_alvo} palavras)
 - Tom acolhedor, reflexivo, encorajador — como uma conversa sincera, não um sermão/palestra formal
-- Termine com uma mensagem de esperança/encorajamento prática para o dia a dia{linha_extra}
+- {instrucao_final}{linha_extra}
 - NÃO mencione apresentador, elementos visuais ou câmera
 - Texto corrido, pronto para narração
 - SEM formatação, asteriscos, marcadores ou emojis
@@ -466,12 +450,10 @@ def transcrever_palavras_com_timestamps(audio_path):
     return palavras_tempo
 
 
-def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, palavras_por_bloco=7):
+def gerar_clips_legenda(audio_path, roteiro, largura, altura, offset=0.0, palavras_por_bloco=7):
     """
     Gera os clipes de texto (legenda) centralizados, sincronizados com a narração.
-    O TEXTO vem do roteiro original (sempre correto); o TEMPO vem do Whisper (alinhamento),
-    já transcrito uma única vez em main() e reaproveitado aqui (e em gerar_clips_destaque,
-    e no mapeamento de blocos) — evita rodar o Whisper mais de uma vez por vídeo.
+    O TEXTO vem do roteiro original (sempre correto); o TEMPO vem do Whisper (alinhamento).
     As palavras do roteiro são pareadas em ordem com os timestamps detectados pelo Whisper —
     pequena diferença na contagem de palavras é normal e não quebra o alinhamento, só desloca
     ligeiramente o fim do vídeo (raramente perceptível).
@@ -481,8 +463,14 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
     if not ATIVAR_LEGENDA:
         return []
 
+    try:
+        palavras_tempo = transcrever_palavras_com_timestamps(audio_path)
+    except Exception as e:
+        print(f"⚠️ Não foi possível transcrever para legenda: {e} — seguindo sem legenda")
+        return []
+
     if not palavras_tempo:
-        print("⚠️ Sem timestamps de palavra disponíveis — seguindo sem legenda")
+        print("⚠️ Whisper não retornou timestamps de palavra — seguindo sem legenda")
         return []
 
     palavras_roteiro = roteiro.split()
@@ -494,9 +482,8 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
         print(f"  ℹ️ Roteiro tem {len(palavras_roteiro)} palavras, Whisper detectou {len(palavras_tempo)} "
               f"marcações de tempo — alinhando pelas {n} em comum (diferença pequena é normal)")
 
-    fontsize = max(24, int(largura / 24))  # menor — legenda de apoio, não protagonista
+    fontsize = max(28, int(largura / 18))
     largura_texto = int(largura * 0.85)
-    margem_inferior = int(altura * 0.08)
 
     clips = []
     i = 0
@@ -518,7 +505,7 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
                 size=(largura_texto, None),
                 align='center'
             )
-            txt_clip = txt_clip.set_position(('center', altura - margem_inferior - txt_clip.h))
+            txt_clip = txt_clip.set_position(('center', 'center'))
             txt_clip = txt_clip.set_start(offset + inicio_tempo)
             txt_clip = txt_clip.set_duration(max(0.3, fim_tempo - inicio_tempo))
             clips.append(txt_clip)
@@ -532,131 +519,6 @@ def gerar_clips_legenda(roteiro, palavras_tempo, largura, altura, offset=0.0, pa
     else:
         print(f"✅ {len(clips)} bloco(s) de legenda gerado(s), com texto do roteiro original")
 
-    return clips
-
-
-def gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos, largura, altura, offset=0.0):
-    """
-    Fase 2 — texto de destaque: diferente da legenda comum, isso é o "grito visual" tipo
-    webdoc — só a palavra/expressão marcada como importante, maior, em cor de destaque,
-    aparecendo exatamente no timestamp em que é falada.
-    Efeito de entrada/saída (não é só fade): o texto nasce a 70% do tamanho e "estala" até
-    100% em DURACAO_POP_DESTAQUE segundos (efeito pop), combinado com fade in/out — testado
-    isoladamente antes de entrar aqui, renderiza sem erro mesmo com ImageMagick padrão.
-    """
-    if not ATIVAR_DESTAQUE or not destaques_resolvidos:
-        return []
-
-    # Tamanho controlável via config.json ('fonte_destaque_tamanho_px' ganha de tudo;
-    # senão 'fonte_destaque_divisor', default 8 = largura/8, igual ao comportamento antigo).
-    # Tamanho controlável via config.json ('fonte_destaque_tamanho_px' ganha de tudo;
-    # senão 'fonte_destaque_divisor', default 8 = largura/8, igual ao comportamento antigo).
-    fontsize_base = int(DESTAQUE_TAMANHO_PX) if DESTAQUE_TAMANHO_PX else max(50, int(largura / DESTAQUE_TAMANHO_DIVISOR))
-    largura_texto = int(largura * 0.9)
-    pos_y_alvo = int(altura * 0.5)  # centro da tela, não mais competindo com a legenda
-    clips = []
-
-    # Ordenado por instante de início — necessário pro fix de sobreposição abaixo, que
-    # precisa saber quando o PRÓXIMO destaque começa pra evitar dois textos na tela
-    # ao mesmo tempo, na mesma posição central.
-    destaques_ordenados = sorted(destaques_resolvidos, key=lambda d: d['inicio'])
-
-    def _fonte_pil_destaque(tamanho):
-        """Mesma lógica de fallback do _carregar_fonte_pil (thumbnail), mas pra
-        FONTE_DESTAQUE especificamente. Se FONTE_DESTAQUE for um caminho de arquivo
-        válido, usa ele; senão cai pras fontes de sistema conhecidas."""
-        if FONTE_DESTAQUE and os.path.exists(FONTE_DESTAQUE):
-            return ImageFont.truetype(FONTE_DESTAQUE, tamanho)
-        for caminho in _FONTE_TTF_CANDIDATOS:
-            if os.path.exists(caminho):
-                return ImageFont.truetype(caminho, tamanho)
-        return ImageFont.load_default()
-
-    _medidor_img = Image.new('RGB', (1, 1))
-    _medidor_draw = ImageDraw.Draw(_medidor_img)
-
-    def _largura_renderizada(texto, tamanho):
-        """BUGFIX (fonte gigante quebrando palavra no meio, ex: 'Resiliênci'/'a'):
-        a versão anterior media a largura chamando o ImageMagick (TextClip method='label')
-        — se isso falhar silenciosamente (fonte não encontrada pelo IM, erro de processo,
-        etc.), o except:pass deixava passar o fontsize_base gigante sem encolher nada.
-        Medir com PIL direto é mais confiável (mesma lib já usada na thumbnail, sem
-        depender de um subprocess do ImageMagick) e nunca lança silenciosamente — se a
-        fonte não existir, cai pro fallback de sistema em vez de quebrar a medição.
-        Aplica 12% de margem de segurança pra cobrir qualquer diferença fina de métrica
-        entre o PIL (medição) e o ImageMagick (render final do 'caption')."""
-        fonte = _fonte_pil_destaque(tamanho)
-        bbox = _medidor_draw.textbbox((0, 0), texto, font=fonte)
-        return int((bbox[2] - bbox[0]) * 1.12)
-
-    for idx, destaque in enumerate(destaques_ordenados):
-        try:
-            texto_upper = destaque['texto'].upper()
-
-            # Ajusta o fontsize pra caber: a causa da quebra no meio da palavra (ex:
-            # "Resiliênci" numa linha, "a" na outra) é o fontsize fixo não considerar o
-            # tamanho da palavra — em method='caption', se UMA palavra sozinha já é mais
-            # larga que a caixa de texto, o ImageMagick quebra a palavra, não só a linha.
-            # Medimos a palavra mais longa do destaque (não a frase toda, que pode
-            # legitimamente quebrar em várias palavras) e encolhemos o fontsize até ela
-            # caber inteira numa linha — em LOOP (não só uma estimativa de uma tentativa
-            # só), porque a relação largura/fontsize não é perfeitamente linear entre
-            # fontes/glifos diferentes, e uma única estimativa pode ainda estourar.
-            fontsize = fontsize_base
-            palavras = texto_upper.split()
-            palavra_mais_longa = max(palavras, key=len) if palavras else texto_upper
-            for _tentativa in range(6):
-                largura_palavra = _largura_renderizada(palavra_mais_longa, fontsize)
-                if largura_palavra <= largura_texto or fontsize <= 28:
-                    break
-                fontsize = max(28, int(fontsize * largura_texto / largura_palavra))
-
-            txt_clip = TextClip(
-                texto_upper,
-                fontsize=fontsize,
-                font=FONTE_DESTAQUE,
-                color=COR_DESTAQUE,
-                stroke_color='black',
-                stroke_width=max(2, fontsize // 14),
-                method='caption',
-                size=(largura_texto, None),
-                align='center'
-            )
-            w0, h0 = txt_clip.size
-
-            def _escala(t, w0=w0, h0=h0):
-                fator = 0.7 + 0.3 * min(t / DURACAO_POP_DESTAQUE, 1.0)
-                return (max(1, int(w0 * fator)), max(1, int(h0 * fator)))
-
-            def _posicao(t, pos_y_alvo=pos_y_alvo, escala=_escala):
-                _, h_atual = escala(t)
-                return ('center', pos_y_alvo - h_atual // 2)
-
-            # duração mínima generosa: o pop (0.18s) + fade-out (0.2s) já consomem ~0.4s,
-            # então precisa sobrar tempo de fato "parado" e legível na tela — antes só tinha
-            # 0.6s de mínimo, quase tudo consumido pela própria transição de entrada/saída
-            duracao = max(1.3, (destaque['fim'] - destaque['inicio']) + 0.7)
-
-            # BUGFIX (destaque sobrepondo o outro, ex: "tribulação" ainda na tela quando
-            # "perseverança" começa): as duas palavras são desenhadas na MESMA posição
-            # central — se a duração de uma ultrapassa o início da próxima, elas empilham
-            # visualmente. Limitamos pelo início do próximo destaque, com uma folga de
-            # 0.15s pra garantir que um sai antes do outro entrar. Piso de 0.45s porque é
-            # o mínimo pro pop-in (0.18s) + fade-out (0.25s) ainda renderizarem direito.
-            if idx + 1 < len(destaques_ordenados):
-                espaco_disponivel = destaques_ordenados[idx + 1]['inicio'] - destaque['inicio'] - 0.15
-                duracao = max(0.45, min(duracao, espaco_disponivel))
-
-            txt_clip = txt_clip.set_duration(duracao)
-            txt_clip = txt_clip.resize(_escala).set_position(_posicao)
-            txt_clip = txt_clip.set_start(offset + destaque['inicio'])
-            txt_clip = txt_clip.crossfadein(DURACAO_POP_DESTAQUE).crossfadeout(0.25)
-            clips.append(txt_clip)
-        except Exception as e:
-            print(f"  ⚠️ Erro ao gerar destaque '{destaque.get('texto')}': {e} — pulando")
-
-    if clips:
-        print(f"✨ {len(clips)} destaque(s) visual(is) gerado(s) (efeito pop + fade in/out)")
     return clips
 
 
@@ -824,192 +686,11 @@ def baixar_clipes_pexels(termo, orientacao, duracao_alvo, offset_inicio=0.0):
     return clipes
 
 
-def _duracao_real_arquivo(caminho):
-    """ffprobe rápido (só lê o cabeçalho/container, não decodifica frames) pra pegar a
-    duração REAL de um arquivo de vídeo já baixado — usado como teto de segurança contra
-    o metadado 'duration' da API do Pexels divergir da variante de arquivo baixada.
-    Retorna None se ffprobe falhar/não estiver disponível — nesse caso o código volta a
-    confiar só no metadado da API (comportamento antigo), sem quebrar o vídeo."""
-    import subprocess
-    try:
-        resultado = subprocess.run(
-            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-             '-of', 'default=noprint_wrappers=1:nokey=1', caminho],
-            capture_output=True, text=True, timeout=10
-        )
-        return float(resultado.stdout.strip())
-    except Exception:
-        return None
-
-
-def baixar_clipes_por_bloco(blocos_com_tempo, orientacao):
-    """
-    Fase 2 — B-roll casado por BLOCO do roteiro, não pelo vídeo inteiro: cada bloco
-    (gancho, evidência, objeção...) já chegou aqui com seu próprio 'termo' (escolhido por
-    producao_visual.escolher_termos_por_bloco) e sua própria janela de tempo dentro da
-    narração (bloco['inicio']/['duracao'], de mapear_tempos_para_blocos). Cada clipe baixado
-    já nasce posicionado no tempo certo — sem isso, o vídeo inteiro usava só 1 termo de busca.
-    Compartilha o histórico anti-repetição do Pexels entre todos os blocos do mesmo vídeo,
-    pra não repetir o mesmo vídeo em blocos diferentes do mesmo short/vídeo longo.
-    Se o roteiro caiu no fallback simples (1 bloco só, 'roteiro_completo'), isso se comporta
-    exatamente como a antiga baixar_clipes_pexels() — degrada graciosamente, não quebra nada.
-    """
-    largura_alvo = 1080 if orientacao == 'portrait' else 1920
-    os.makedirs(f'{ASSETS_DIR}/pexels', exist_ok=True)
-
-    usados_recentemente = _carregar_pexels_usados_recentes()
-    usados_no_video = set()
-    print(f"  📋 {len(usados_recentemente)} vídeo(s) no histórico dos últimos "
-          f"{DIAS_EVITAR_REPETICAO_PEXELS} dias (serão evitados)")
-
-    todos_os_clipes = []
-    for i, bloco in enumerate(blocos_com_tempo):
-        termo = bloco['termo']
-        duracao_alvo = bloco['duracao']
-        offset_bloco = bloco['inicio']
-
-        print(f"  🎯 Bloco '{bloco['bloco']}' ({duracao_alvo:.1f}s) — termo: '{termo}'")
-
-        # Webdoc, opt-in via config.json ('usar_prints_noticia': true): em vez de buscar
-        # B-roll no Pexels pra esse bloco, gera um mockup de print de notícia (mockups_visuais.py)
-        # com a manchete decidida em decidir_prints_de_noticia(). Nada disso roda se a flag
-        # não estiver ligada — bloco.get() volta None e cai direto no fluxo antigo abaixo.
-        if bloco.get('usa_print_noticia'):
-            try:
-                caminho_print = gerar_print_noticia(
-                    manchete=bloco['manchete_noticia'],
-                    subtitulo=bloco.get('subtitulo_noticia'),
-                    output_path=f"{ASSETS_DIR}/prints/bloco_{i}.png",
-                )
-                todos_os_clipes.append({
-                    'path': caminho_print,
-                    'inicio': offset_bloco,
-                    'duracao': duracao_alvo,
-                    'transicao_bloco': True,
-                })
-                print(f"    📰 Print de notícia gerado: \"{bloco['manchete_noticia']}\"")
-                continue
-            except Exception as e:
-                print(f"    ⚠️ Falha ao gerar print de notícia ({e}) — caindo pro B-roll normal")
-
-        tempo_coberto = 0.0
-        pagina = 1
-        while tempo_coberto < duracao_alvo and pagina <= MAX_PAGINAS_BLOCO:
-            if LIMITE_CLIPES_TESTE > 0 and len(todos_os_clipes) >= LIMITE_CLIPES_TESTE:
-                print(f"   ✂️ MODO TESTE: limitado a {LIMITE_CLIPES_TESTE} clipe(s) no total")
-                return todos_os_clipes
-
-            videos_encontrados = pesquisar_videos_pexels(termo, orientacao, pagina=pagina)
-            if not videos_encontrados:
-                print(f"    ⚠️ Página {pagina} sem resultados para '{termo}'")
-                break
-            random.shuffle(videos_encontrados)
-
-            for video in videos_encontrados:
-                if tempo_coberto >= duracao_alvo:
-                    break
-                if LIMITE_CLIPES_TESTE > 0 and len(todos_os_clipes) >= LIMITE_CLIPES_TESTE:
-                    break
-
-                video_id = video.get('id')
-                if video_id in usados_no_video or video_id in usados_recentemente:
-                    continue
-
-                arquivo = _escolher_arquivo_video(video.get('video_files', []), largura_alvo)
-                if not arquivo:
-                    continue
-
-                destino = f"{ASSETS_DIR}/pexels/{video_id}.mp4"
-                try:
-                    resp = requests.get(arquivo['link'], timeout=60)
-                    resp.raise_for_status()
-                    with open(destino, 'wb') as f:
-                        f.write(resp.content)
-                except Exception as e:
-                    print(f"    ⚠️ Erro ao baixar vídeo {video_id}: {e}")
-                    continue
-
-                usados_no_video.add(video_id)
-                # BUGFIX (tela preta ~1s na transição): a duração que a API do Pexels
-                # informa ('duration' no JSON) é do vídeo mestre, não necessariamente da
-                # variante/resolução específica que baixamos em 'arquivo['link']' — quando
-                # elas divergem, o clipe real acaba mais curto que o previsto e o próximo
-                # corte fica agendado tarde demais, deixando um vão sem nada desenhado
-                # (preto) entre o fim do clipe real e o início do próximo. Medimos a
-                # duração REAL do arquivo já em disco (ffprobe, rápido, não decodifica
-                # o vídeo inteiro) e usamos ela como teto — nunca confiamos só no metadado.
-                duracao_real = _duracao_real_arquivo(destino)
-                duracao_disponivel = video.get('duration', 6)
-                if duracao_real is not None and duracao_real < duracao_disponivel:
-                    print(f"    ℹ️ Duração real do arquivo ({duracao_real:.2f}s) menor que "
-                          f"a informada pela API ({duracao_disponivel:.2f}s) — usando a real "
-                          f"pra não deixar vão preto na transição")
-                    duracao_disponivel = duracao_real
-                duracao_uso = min(duracao_disponivel, DURACAO_MAXIMA_CLIPE, duracao_alvo - tempo_coberto)
-
-                todos_os_clipes.append({
-                    'path': destino,
-                    'inicio': offset_bloco + tempo_coberto,
-                    'duracao': duracao_uso,
-                    'transicao_bloco': (tempo_coberto == 0.0),  # 1º clipe do bloco → leva transição
-                })
-                tempo_coberto += duracao_uso
-                _salvar_pexels_usado(video_id)
-
-            pagina += 1
-
-        if tempo_coberto < duracao_alvo:
-            print(f"    ⚠️ Cobertura parcial do bloco: {tempo_coberto:.1f}s/{duracao_alvo:.1f}s")
-
-    print(f"  ✅ {len(todos_os_clipes)} clipe(s) baixado(s) no total, casados por bloco do roteiro")
-    return todos_os_clipes
-
-
 # ============================================================
 # MONTAGEM DE VÍDEO
 # ============================================================
 
-DURACAO_TRANSICAO = float(os.environ.get('DURACAO_TRANSICAO', '0.7'))  # crossfade entre blocos, em segundos
-
-# Quanto antecipar o SFX de transição (woosh) em relação ao instante teórico do corte
-# (tempo_corte). AJUSTE: o crossfade visual começa DURACAO_TRANSICAO segundos ANTES de
-# tempo_corte e só termina de aparecer NELE — um whoosh soa natural quando o INÍCIO do
-# som coincide com o INÍCIO do movimento visual, não com um ponto no meio do efeito.
-# Por isso o padrão agora é igual a DURACAO_TRANSICAO (som e crossfade começam juntos,
-# e terminam praticamente juntos também, já que o woosh.mp3 aparado tem ~0.6s de conteúdo
-# audível pra um crossfade de 0.7s). Ajustável via config.json ('antecipacao_sfx_transicao')
-# se quiser algo diferente — 0 desativa a antecipação (comportamento anterior ao fix).
-ANTECIPACAO_SFX_TRANSICAO = float(os.environ.get(
-    'ANTECIPACAO_SFX_TRANSICAO', config.get('antecipacao_sfx_transicao', DURACAO_TRANSICAO)
-))
-
-
-TRANSICOES_VIDEO = config.get('transicoes_video', ['crossfade'])  # ['crossfade','flash','glitch','shadow_wipe']
-
-
-def _clip_de_imagem_com_zoom(caminho_imagem, duracao, largura, altura, zoom_final=1.08):
-    """
-    Ken Burns simples (zoom lento e contínuo) pra imagens estáticas — usado pelos
-    prints de notícia gerados em mockups_visuais.py. Sem isso, uma imagem 100% parada
-    destoa visualmente do resto do B-roll (que sempre tem movimento de câmera real).
-    """
-    img_clip = ImageClip(caminho_imagem).set_duration(duracao)
-    if img_clip.w / img_clip.h > largura / altura:
-        img_clip = img_clip.resize(height=altura)
-    else:
-        img_clip = img_clip.resize(width=largura)
-
-    def _fator_zoom(t):
-        return 1 + (zoom_final - 1) * (t / duracao if duracao > 0 else 1)
-
-    img_clip = img_clip.resize(_fator_zoom).set_position('center')
-    return CompositeVideoClip([img_clip], size=(largura, altura)).set_duration(duracao)
-
-
 def _preparar_clip_pexels(item, largura, altura):
-    if item['path'].lower().endswith(('.png', '.jpg', '.jpeg')):
-        return _clip_de_imagem_com_zoom(item['path'], item['duracao'], largura, altura).set_start(item['inicio'])
-
     clip = VideoFileClip(item['path'])
     if clip.duration > item['duracao']:
         clip = clip.subclip(0, item['duracao'])
@@ -1026,50 +707,14 @@ def _preparar_clip_pexels(item, largura, altura):
 
 
 def _montar_clips_pexels(lista_clipes, largura, altura):
-    """
-    Corte seco dentro do mesmo bloco (vídeo real já tem movimento próprio, não precisa
-    de transição). Transição (crossfade ou outra, ver transicoes.py) só na TROCA de
-    bloco do roteiro — é o que dá a sensação de "capítulo novo" em vez de só mais um
-    corte de B-roll.
-    Qual transição usar é escolhida (aleatoriamente, se houver mais de uma) a partir da
-    lista em config.json 'transicoes_video' — default ['crossfade'] mantém o
-    comportamento antigo pra canais que não configuraram nada. Se a transição
-    escolhida falhar ao renderizar (efeito novo, mais frágil que o dissolve simples),
-    cai pro crossfade sem derrubar o vídeo inteiro.
-    """
+    """Sem transição — corte seco entre clipes (vídeo real já tem movimento próprio)."""
     clips_prontos = []
-    transicoes_aplicadas = 0
-    contagem_por_tipo = {}
     for i, item in enumerate(lista_clipes):
         try:
-            clip = _preparar_clip_pexels(item, largura, altura)
-            if i > 0 and item.get('transicao_bloco') and clips_prontos:
-                nome_transicao = random.choice(TRANSICOES_VIDEO) if TRANSICOES_VIDEO else 'crossfade'
-                funcao_transicao = TRANSICOES_DISPONIVEIS.get(nome_transicao, transicao_crossfade)
-                try:
-                    clip_anterior, clip = funcao_transicao(
-                        clips_prontos[-1], clip, item['inicio'], DURACAO_TRANSICAO
-                    )
-                except Exception as e:
-                    print(f"  ⚠️ Transição '{nome_transicao}' falhou ({e}) — usando crossfade")
-                    nome_transicao = 'crossfade'
-                    clip_anterior, clip = transicao_crossfade(
-                        clips_prontos[-1], clip, item['inicio'], DURACAO_TRANSICAO
-                    )
-                clips_prontos[-1] = clip_anterior
-                transicoes_aplicadas += 1
-                contagem_por_tipo[nome_transicao] = contagem_por_tipo.get(nome_transicao, 0) + 1
-            clips_prontos.append(clip)
+            clips_prontos.append(_preparar_clip_pexels(item, largura, altura))
         except Exception as e:
             print(f"  ⚠️ Erro ao preparar clipe {i}: {e}")
-    resumo_tipos = ", ".join(f"{n}x {tipo}" for tipo, n in contagem_por_tipo.items())
-    print(f"  🔀 {transicoes_aplicadas} transição(ões) de {DURACAO_TRANSICAO}s aplicada(s) entre "
-          f"{len(clips_prontos)} clipe(s)" + (f" ({resumo_tipos})" if resumo_tipos else "") +
-          " — 0 é normal se o vídeo não chegou a trocar de bloco "
-          "(ex: teste com LIMITE_CLIPES_TESTE baixo, cobrindo só o 1º bloco)")
     return clips_prontos
-
-
 
 
 def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir='assets/musicas'):
@@ -1096,122 +741,30 @@ def _mixar_musica_fundo(audio_narracao, duracao_total, volume=0.06, musicas_dir=
     return CompositeAudioClip([audio_narracao, musica])
 
 
-def aplicar_sfx(audio_base, eventos_sfx, offset=0.0, sfx_dir='assets/sfx'):
-    """
-    Fase 2 — camada de SFX orientada a evento, mesmo espírito de fallback gracioso do
-    _mixar_musica_fundo: toca um som curto a cada troca de bloco (evento 'transicao')
-    e a cada destaque visual que aparece (evento 'destaque'). Se não achar arquivo,
-    essa camada simplesmente não ativa — não quebra o vídeo.
-
-    Estrutura recomendada (efeitos curtos, licença livre — ex: CC0 do Freesound):
-        assets/sfx/transicao/*.mp3|*.wav|*.ogg  (ex: whoosh curto, corte seco)
-        assets/sfx/destaque/*.mp3|*.wav|*.ogg   (ex: pop, ping, impacto leve)
-    Se essas subpastas não existirem/estiverem vazias, cai pra um pool único direto
-    em assets/sfx/*.* (compartilhado entre os dois tipos de evento) — pra não exigir
-    a estrutura de subpastas logo no primeiro teste.
-    """
-    if not ATIVAR_SFX or not eventos_sfx:
-        return audio_base
-
-    import glob
-    from moviepy.editor import AudioFileClip, CompositeAudioClip
-
-    extensoes = ('*.mp3', '*.wav', '*.ogg', '*.m4a')
-
-    def _listar(pasta):
-        arquivos = []
-        for ext in extensoes:
-            arquivos += glob.glob(f'{pasta}/{ext}')
-        return arquivos
-
-    bibliotecas = {tipo: _listar(f'{sfx_dir}/{tipo}') for tipo in ('transicao', 'destaque')}
-
-    if not any(bibliotecas.values()):
-        pool_flat = _listar(sfx_dir)
-        if pool_flat:
-            print(f"  ℹ️ Sem subpastas transicao/destaque — usando os {len(pool_flat)} "
-                  f"arquivo(s) soltos em {sfx_dir}/ como pool único pra ambos os eventos")
-            bibliotecas = {'transicao': pool_flat, 'destaque': pool_flat}
-        else:
-            print(f"  ℹ️ Nenhum SFX encontrado em {sfx_dir}/ — seguindo sem camada de som de eventos")
-            return audio_base
-
-    camadas = [audio_base]
-    aplicados = 0
-    for evento in eventos_sfx:
-        arquivos = bibliotecas.get(evento['tipo'], [])
-        if not arquivos:
-            continue
-        arquivo = random.choice(arquivos)
-        try:
-            # BUGFIX (woosh "atrasado"): o corte visual (crossfade) começa
-            # DURACAO_TRANSICAO segundos ANTES do instante 'tempo' e só termina de
-            # aparecer NO instante 'tempo' — se o SFX toca exatamente em 'tempo', o
-            # olho já viu a imagem mudando bem antes do ouvido ouvir o whoosh. Disparamos
-            # o SFX de transição um pouco mais cedo (ANTECIPACAO_SFX_TRANSICAO) pra ele
-            # coincidir com o MEIO do efeito visual em vez do final. Não se aplica ao
-            # 'destaque' (mouse-click), que já está sincronizado corretamente.
-            antecipacao = ANTECIPACAO_SFX_TRANSICAO if evento['tipo'] == 'transicao' else 0.0
-            inicio_sfx = max(0.0, offset + evento['tempo'] - antecipacao)
-            sfx_clip = AudioFileClip(arquivo).set_start(inicio_sfx).volumex(0.5)
-            camadas.append(sfx_clip)
-            aplicados += 1
-            print(f"    🔊 SFX '{evento['tipo']}' em t={evento['tempo']:.2f}s → {os.path.basename(arquivo)}")
-        except Exception as e:
-            print(f"  ⚠️ Erro ao carregar SFX '{arquivo}': {e}")
-
-    if aplicados == 0:
-        return audio_base
-
-    print(f"  🔊 {aplicados} evento(s) de SFX aplicado(s)")
-    return CompositeAudioClip(camadas)
-
-
-def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_narracao,
-                       clips_legenda=None, clips_destaque=None, eventos_sfx=None):
+def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
     """
     Vertical (short). Estrutura de tempo:
     [0s ───── música+vídeo ─────][3s narração começa ───...──][fim narração ── +5s música+vídeo][fade-out 2s]
     """
     print("📹 Criando short (Pexels)...")
-    clips_legenda = clips_legenda or []
-    clips_destaque = clips_destaque or []
     duracao_total = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
 
     clips_video = _montar_clips_pexels(lista_clipes, 1080, 1920)
     if not clips_video:
         return None
 
-    # BUGFIX: os itens de lista_clipes vêm com tempo relativo ao INÍCIO DA NARRAÇÃO
-    # (0s = primeira palavra falada), mas a narração de verdade só começa em
-    # SEGUNDOS_LEAD_IN dentro do vídeo final. Sem este deslocamento, cada troca de
-    # mídia (e o SFX de transição, que já soma esse offset corretamente em
-    # aplicar_sfx) acontecia SEGUNDOS_LEAD_IN segundos ANTES do corte visual real —
-    # por isso o woosh soava "no meio da mídia" em vez de na troca.
-    clips_video = [c.set_start(c.start + SEGUNDOS_LEAD_IN) for c in clips_video]
-
-    # O 1º clipe cobria [0, SEGUNDOS_LEAD_IN) antes deste deslocamento — era o
-    # próprio "lead-in" visual antes da narração começar. Puxamos ele de volta pro
-    # instante 0 (mesma técnica já usada abaixo pro ÚLTIMO clipe, que é esticado
-    # pra cobrir o tail): mantém o vídeo cobrindo o início sem tela preta.
-    primeiro = clips_video[0]
-    if primeiro.start > 0:
-        gap_inicial = primeiro.start
-        clips_video[0] = primeiro.set_start(0).set_duration(primeiro.duration + gap_inicial)
-
     ultimo = clips_video[-1]
     cobertura = ultimo.start + ultimo.duration
     if cobertura < duracao_total:
         clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    video_base = CompositeVideoClip(
-        clips_video + clips_legenda + clips_destaque, size=(1080, 1920)
-    ).set_duration(duracao_total)
+    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1080, 1920, offset=SEGUNDOS_LEAD_IN)
+
+    video_base = CompositeVideoClip(clips_video + clips_legenda, size=(1080, 1920)).set_duration(duracao_total)
     video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
 
     audio_narr = AudioFileClip(audio_path).set_start(SEGUNDOS_LEAD_IN)
-    audio_com_sfx = aplicar_sfx(audio_narr, eventos_sfx or [], offset=SEGUNDOS_LEAD_IN)
-    audio_final = _mixar_musica_fundo(audio_com_sfx, duracao_total, volume=0.06)
+    audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
     audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
     video_final = video_base.set_audio(audio_final)
@@ -1225,12 +778,9 @@ def criar_video_curto(audio_path, roteiro, lista_clipes, output_file, duracao_na
     return output_file
 
 
-def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_narracao,
-                       clips_legenda=None, clips_destaque=None, eventos_sfx=None):
+def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_narracao):
     """Horizontal (long), com intro fixa de assets/intro/ antes do bloco lead-in/narração/tail."""
     print("📹 Criando vídeo longo (Pexels + intro)...")
-    clips_legenda = clips_legenda or []
-    clips_destaque = clips_destaque or []
 
     import glob
     intros = glob.glob(f'{ASSETS_DIR}/intro/*.mp4') + glob.glob(f'{ASSETS_DIR}/intro/*.mov')
@@ -1257,29 +807,7 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
     duracao_total = intro_duracao + duracao_bloco
 
     clips_video = _montar_clips_pexels(lista_clipes, 1920, 1080)
-    # BUGFIX real (era o culpado do woosh desalinhado): faltava somar SEGUNDOS_LEAD_IN
-    # aqui — só a intro estava sendo compensada. lista_clipes vem em tempo relativo ao
-    # início da narração, mas a narração só começa em intro_duracao + SEGUNDOS_LEAD_IN
-    # no vídeo final (ver offset_narracao mais abaixo, usado pro áudio e pro SFX).
-    # Sem os dois offsets aqui, cada corte de mídia acontecia SEGUNDOS_LEAD_IN segundos
-    # adiantado em relação ao evento de SFX/narração correspondente.
-    clips_video = [c.set_start(c.start + intro_duracao + SEGUNDOS_LEAD_IN) for c in clips_video]
-
-    # O 1º clipe cobria [intro_duracao, intro_duracao + SEGUNDOS_LEAD_IN) antes deste
-    # deslocamento — o lead-in visual logo após a intro. Puxamos ele de volta (mesma
-    # técnica já usada abaixo pro ÚLTIMO clipe, esticado pra cobrir o tail).
-    if clips_video:
-        primeiro = clips_video[0]
-        if primeiro.start > intro_duracao:
-            gap_inicial = primeiro.start - intro_duracao
-            clips_video[0] = primeiro.set_start(intro_duracao).set_duration(primeiro.duration + gap_inicial)
-
-    # BUGFIX: clips_legenda e clips_destaque chegam do main() com o tempo já calculado
-    # em cima da narração (offset = SEGUNDOS_LEAD_IN), mas sem saber a duração da intro
-    # (que só existe aqui dentro). Sem este deslocamento, eles tocavam `intro_duracao`
-    # segundos adiantados — exatamente a dessincronia relatada.
-    clips_legenda = [c.set_start(c.start + intro_duracao) for c in clips_legenda]
-    clips_destaque = [c.set_start(c.start + intro_duracao) for c in clips_destaque]
+    clips_video = [c.set_start(c.start + intro_duracao) for c in clips_video]
 
     if clips_video:
         ultimo = clips_video[-1]
@@ -1287,18 +815,17 @@ def criar_video_longo(audio_path, roteiro, lista_clipes, output_file, duracao_na
         if cobertura < duracao_total:
             clips_video[-1] = ultimo.set_duration(ultimo.duration + (duracao_total - cobertura))
 
-    offset_narracao = intro_duracao + SEGUNDOS_LEAD_IN
+    clips_legenda = gerar_clips_legenda(audio_path, roteiro, 1920, 1080, offset=intro_duracao + SEGUNDOS_LEAD_IN)
 
-    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda + clips_destaque
+    todos_os_clips = ([intro_clip] if intro_clip else []) + clips_video + clips_legenda
     if not todos_os_clips:
         return None
 
     video_base = CompositeVideoClip(todos_os_clips, size=(1920, 1080)).set_duration(duracao_total)
     video_base = video_base.fadeout(SEGUNDOS_FADEOUT)
 
-    audio_narr = AudioFileClip(audio_path).set_start(offset_narracao)
-    audio_com_sfx = aplicar_sfx(audio_narr, eventos_sfx or [], offset=offset_narracao)
-    audio_final = _mixar_musica_fundo(audio_com_sfx, duracao_total, volume=0.06)
+    audio_narr = AudioFileClip(audio_path).set_start(intro_duracao + SEGUNDOS_LEAD_IN)
+    audio_final = _mixar_musica_fundo(audio_narr, duracao_total, volume=0.06)
     audio_final = audio_final.audio_fadeout(SEGUNDOS_FADEOUT)
 
     video_final = video_base.set_audio(audio_final)
@@ -1347,10 +874,13 @@ def gerar_texto_thumbnail(titulo, tema):
     motivacionais virais — um resumo/gancho direto do título, não o título reescrito.
     Se falhar, usa as 3 primeiras palavras do título como texto de segurança.
     """
-    prompt = f"""Baseado neste vídeo de {CONTEXTO_NICHO}, crie um texto CURTO para
-thumbnail de YouTube, em MAIÚSCULAS, no estilo de canais motivacionais virais.
-
-Exemplos de título -> possíveis textos de thumbnail (estilo de referência — escolha UMA ideia
+    exemplos_cfg = config.get('exemplos_thumbnail', [])
+    if exemplos_cfg:
+        pares = "\n\n".join(f'"{e["titulo"]}"\n-> "{e["texto"]}"' for e in exemplos_cfg)
+        bloco_exemplos = (f"Exemplos de título -> texto de thumbnail (siga este padrão de formato e "
+                          f"tom; sua resposta deve ser em {IDIOMA_CONTEUDO}):\n{pares}")
+    else:
+        bloco_exemplos = f"""Exemplos de título -> possíveis textos de thumbnail (estilo de referência — escolha UMA ideia
 central, não junte as duas; os exemplos abaixo estão em português só como referência de padrão,
 mas sua resposta deve ser em {IDIOMA_CONTEUDO}):
 "E se você parasse de se preocupar com o amanhã? Descubra a paz que restaura a alma"
@@ -1360,7 +890,15 @@ mas sua resposta deve ser em {IDIOMA_CONTEUDO}):
 -> "UMA NOVA CHANCE"  (ou, alternativamente: "A BONDADE DE DEUS")
 
 Outros exemplos do estilo geral: "NUNCA SE DEFENDA", "INTELIGÊNCIA SOMBRIA", "CONFIANÇA SOMBRIA",
-"NUNCA SE EXPLIQUE".
+"NUNCA SE EXPLIQUE"."""
+
+    instrucao_thumb = config.get('instrucao_thumbnail', '')
+    linha_thumb = f"\n- {instrucao_thumb}" if instrucao_thumb else ""
+
+    prompt = f"""Baseado neste vídeo de {CONTEXTO_NICHO}, crie um texto CURTO para
+thumbnail de YouTube, em MAIÚSCULAS, no estilo de canais motivacionais virais.
+
+{bloco_exemplos}
 
 TEMA: {tema}
 TÍTULO DO VÍDEO: {titulo}
@@ -1371,7 +909,7 @@ REGRAS OBRIGATÓRIAS:
 - Escolha a ideia/palavra mais forte e impactante do título, não tente resumir tudo
 - Impactante, intrigante, desperta curiosidade — não é uma frase explicativa
 - É um resumo/gancho, NÃO é o título do vídeo reescrito
-- Sem ponto final (pode ter "?"), sem aspas
+- Sem ponto final (pode ter "?"), sem aspas{linha_thumb}
 
 Retorne APENAS o texto da thumbnail, nada mais."""
 
@@ -1386,7 +924,7 @@ Retorne APENAS o texto da thumbnail, nada mais."""
     return " ".join(titulo.split()[:3]).upper()
 
 
-def gerar_imagem_agnes(termo, output_path):
+def gerar_imagem_agnes(termo, output_path, prompt_completo=None):
     """
     Gera a imagem de fundo da thumbnail via Agnes AI (gratuito). Se falhar por qualquer motivo
     (sem chave configurada, erro de rede, mudança na API), retorna None — o chamador cai pro
@@ -1402,7 +940,7 @@ def gerar_imagem_agnes(termo, output_path):
         }
         payload = {
             "model": AGNES_IMAGE_MODEL,
-            "prompt": f"{termo}, cinematic, high quality, widescreen composition",
+            "prompt": prompt_completo or f"{termo}, cinematic, high quality, widescreen composition",
             "size": "1024x576"
         }
         resp = requests.post(AGNES_URL, headers=headers, json=payload, timeout=60)
@@ -1437,28 +975,39 @@ def _cortar_para_ratio(img, largura, altura):
     return img.resize((largura, altura))
 
 
+def _baixar_imagem_fundo(termo, caminho_bruto, prompt_agnes=None):
+    """
+    Obtém a imagem de fundo da thumbnail: Agnes AI primeiro (se configurada), fallback Pexels.
+    'termo' é usado na busca do Pexels; 'prompt_agnes' (opcional) é o prompt completo pro Agnes.
+    Retorna True se conseguiu salvar uma imagem em caminho_bruto, False caso contrário.
+    """
+    if gerar_imagem_agnes(termo, caminho_bruto, prompt_completo=prompt_agnes):
+        return True
+
+    fotos = pesquisar_foto_pexels(termo)
+    if not fotos:
+        print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
+        return False
+
+    foto = random.choice(fotos[:5])
+    src = foto.get('src', {})
+    url_imagem = src.get('landscape') or src.get('large') or src.get('original')
+    if not url_imagem:
+        return False
+
+    resp = requests.get(url_imagem, timeout=30)
+    resp.raise_for_status()
+    with open(caminho_bruto, 'wb') as f:
+        f.write(resp.content)
+    return True
+
+
 def _gerar_thumbnail_pexels_agnes(titulo, termo, output_path, largura, altura):
     """Método padrão: imagem de fundo via Agnes AI (fallback Pexels) + faixa preta no topo com título."""
     caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
 
-    resultado_agnes = gerar_imagem_agnes(termo, caminho_bruto)
-
-    if not resultado_agnes:
-        fotos = pesquisar_foto_pexels(termo)
-        if not fotos:
-            print("  ⚠️ Nenhuma foto encontrada no Pexels para thumbnail")
-            return None
-
-        foto = random.choice(fotos[:5])
-        src = foto.get('src', {})
-        url_imagem = src.get('landscape') or src.get('large') or src.get('original')
-        if not url_imagem:
-            return None
-
-        resp = requests.get(url_imagem, timeout=30)
-        resp.raise_for_status()
-        with open(caminho_bruto, 'wb') as f:
-            f.write(resp.content)
+    if not _baixar_imagem_fundo(termo, caminho_bruto):
+        return None
 
     img = Image.open(caminho_bruto).convert('RGB')
     img = _cortar_para_ratio(img, largura, altura)
@@ -1572,56 +1121,7 @@ def _gerar_thumbnail_pool_local(texto_thumb, output_path, largura, altura):
 
     img = Image.open(caminho_imagem).convert('RGB')
     img = _cortar_para_ratio(img, largura, altura)
-    draw = ImageDraw.Draw(img)
-
-    palavras = texto_thumb.split()
-    linhas = _quebrar_em_linhas(palavras, palavras_por_linha=2)
-
-    # Região de texto: metade direita da imagem, com margem
-    x_inicio = int(largura * 0.52)
-    largura_disponivel = int(largura * 0.94) - x_inicio
-
-    tamanho_fonte = int(altura * 0.16)
-    tamanho_minimo = int(altura * 0.06)
-    espacamento = int(altura * 0.02)
-
-    def _medir(linhas_teste, fonte):
-        alturas, larguras = [], []
-        for linha in linhas_teste:
-            bbox = draw.textbbox((0, 0), linha, font=fonte)
-            larguras.append(bbox[2] - bbox[0])
-            alturas.append(bbox[3] - bbox[1])
-        return larguras, alturas
-
-    # Auto-ajuste: reduz a fonte até todas as linhas caberem na largura disponível;
-    # se mesmo no tamanho mínimo não couber, quebra em mais linhas (1 palavra cada)
-    fonte = _carregar_fonte_pil(tamanho_fonte)
-    larguras, alturas = _medir(linhas, fonte)
-
-    while max(larguras) > largura_disponivel and tamanho_fonte > tamanho_minimo:
-        tamanho_fonte = int(tamanho_fonte * 0.9)
-        fonte = _carregar_fonte_pil(tamanho_fonte)
-        larguras, alturas = _medir(linhas, fonte)
-
-    if max(larguras) > largura_disponivel and len(palavras) > len(linhas):
-        # Ainda não coube — quebra em 1 palavra por linha e tenta de novo
-        linhas = _quebrar_em_linhas(palavras, palavras_por_linha=1)
-        tamanho_fonte = int(altura * 0.16)
-        fonte = _carregar_fonte_pil(tamanho_fonte)
-        larguras, alturas = _medir(linhas, fonte)
-        while max(larguras) > largura_disponivel and tamanho_fonte > tamanho_minimo:
-            tamanho_fonte = int(tamanho_fonte * 0.9)
-            fonte = _carregar_fonte_pil(tamanho_fonte)
-            larguras, alturas = _medir(linhas, fonte)
-
-    altura_bloco = sum(alturas) + espacamento * (len(linhas) - 1)
-    y = (altura - altura_bloco) // 2
-    cores = [(255, 215, 0), (255, 255, 255)]  # alterna dourado/branco por linha
-
-    for i, linha in enumerate(linhas):
-        x = x_inicio + (largura_disponivel - larguras[i]) // 2
-        draw.text((x, y), linha, font=fonte, fill=cores[i % len(cores)])
-        y += alturas[i] + espacamento
+    _desenhar_texto_direita(img, texto_thumb)
 
     img.save(output_path, quality=90)
     _salvar_thumb_usada(nome_arquivo)
@@ -1629,7 +1129,165 @@ def _gerar_thumbnail_pool_local(texto_thumb, output_path, largura, altura):
     return output_path
 
 
-def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
+def _desenhar_texto_direita(img, texto, destaque_final=False, contorno=False,
+                           tamanho_inicial_frac=0.16, maximizar_fonte=False):
+    """
+    Desenha o texto (2-3 linhas, no máx. 2 palavras por linha) centralizado na metade direita
+    da imagem, com auto-ajuste do tamanho da fonte. Modifica 'img' no lugar.
+    - destaque_final=False: alterna dourado/branco por linha (padrão do pool_local)
+    - destaque_final=True: todas as linhas brancas, a ÚLTIMA em dourado (destaca a palavra-chave)
+    - contorno=True: contorno preto ao redor das letras (legibilidade sobre fundo variável)
+    - tamanho_inicial_frac: tamanho máximo da fonte como fração da altura da imagem
+    - maximizar_fonte=True: testa também 1 palavra por linha (até 3 linhas) e usa a quebra que
+      permitir a MAIOR fonte — miniaturas mais fortes, principalmente com fontes largas
+    """
+    largura, altura = img.size
+    draw = ImageDraw.Draw(img)
+
+    palavras = texto.split()
+    linhas = _quebrar_em_linhas(palavras, palavras_por_linha=2)
+
+    x_inicio = int(largura * 0.52)
+    largura_disponivel = int(largura * 0.94) - x_inicio
+
+    tamanho_inicial = int(altura * tamanho_inicial_frac)
+    tamanho_minimo = int(altura * 0.06)
+    espacamento = int(altura * 0.02)
+
+    def _contorno_para(tamanho):
+        return max(2, tamanho // 16) if contorno else 0
+
+    def _medir(linhas_teste, fonte, sw):
+        larguras, alturas, topos = [], [], []
+        for linha in linhas_teste:
+            bbox = draw.textbbox((0, 0), linha, font=fonte, stroke_width=sw)
+            larguras.append(bbox[2] - bbox[0])
+            alturas.append(bbox[3] - bbox[1])
+            topos.append(bbox[1])
+        return larguras, alturas, topos
+
+    def _ajustar(linhas_teste):
+        tamanho = tamanho_inicial
+        fonte = _carregar_fonte_pil(tamanho)
+        sw = _contorno_para(tamanho)
+        larguras, alturas, topos = _medir(linhas_teste, fonte, sw)
+        while max(larguras) > largura_disponivel and tamanho > tamanho_minimo:
+            tamanho = int(tamanho * 0.9)
+            fonte = _carregar_fonte_pil(tamanho)
+            sw = _contorno_para(tamanho)
+            larguras, alturas, topos = _medir(linhas_teste, fonte, sw)
+        return fonte, sw, larguras, alturas, topos
+
+    fonte, sw, larguras, alturas, topos = _ajustar(linhas)
+
+    if maximizar_fonte and 1 < len(palavras) <= 3:
+        linhas_alt = _quebrar_em_linhas(palavras, palavras_por_linha=1)
+        resultado_alt = _ajustar(linhas_alt)
+        if getattr(resultado_alt[0], 'size', 0) > getattr(fonte, 'size', 0):
+            linhas = linhas_alt
+            fonte, sw, larguras, alturas, topos = resultado_alt
+
+    if max(larguras) > largura_disponivel and len(palavras) > len(linhas):
+        # Ainda não coube — quebra em 1 palavra por linha e tenta de novo
+        linhas = _quebrar_em_linhas(palavras, palavras_por_linha=1)
+        fonte, sw, larguras, alturas, topos = _ajustar(linhas)
+
+    altura_bloco = sum(alturas) + espacamento * (len(linhas) - 1)
+    y = (altura - altura_bloco) // 2
+
+    dourado, branco = (255, 215, 0), (255, 255, 255)
+    for i, linha in enumerate(linhas):
+        if destaque_final:
+            cor = dourado if i == len(linhas) - 1 else branco
+        else:
+            cor = dourado if i % 2 == 0 else branco
+        x = x_inicio + (largura_disponivel - larguras[i]) // 2
+        # subtrai topos[i]: o bbox não começa em y=0 (ascendente da fonte), então sem isso
+        # o bloco ficaria visualmente deslocado pra baixo
+        draw.text((x, y - topos[i]), linha, font=fonte, fill=cor,
+                  stroke_width=sw, stroke_fill=(0, 0, 0))
+        y += alturas[i] + espacamento
+
+
+def _escurecer_lado_direito(img, inicio=0.25, fim=0.65, intensidade=0.88):
+    """
+    Aplica um degradê escuro da esquerda pra direita: a imagem fica intacta até 'inicio' (fração
+    da largura) e escurece progressivamente até 'fim', mantendo 'intensidade' dali em diante.
+    Garante contraste pro texto na direita mesmo com fundos claros ou imprevisíveis.
+    """
+    largura, altura = img.size
+    mascara = Image.new('L', (largura, altura), 0)
+    draw_m = ImageDraw.Draw(mascara)
+    x0, x1 = int(largura * inicio), int(largura * fim)
+    for x in range(x0, largura):
+        t = min(1.0, (x - x0) / max(1, (x1 - x0)))
+        draw_m.line([(x, 0), (x, altura)], fill=int(255 * intensidade * t))
+    preto = Image.new('RGB', img.size, (0, 0, 0))
+    return Image.composite(preto, img, mascara)
+
+
+def escolher_simbolo_thumbnail(tema, titulo):
+    """
+    Escolhe o SÍMBOLO visual da thumbnail a partir de uma lista curada em
+    config['simbolos_thumbnail'] (termos em inglês, concretos e visualmente inequívocos).
+    Mesmo princípio dos termos de busca: o Gemini só escolhe DENTRO da lista, nunca inventa.
+    """
+    simbolos = config.get('simbolos_thumbnail', [])
+    if not simbolos:
+        return None
+
+    prompt = f"""Tema do vídeo: "{tema}"
+Título: "{titulo}"
+
+Escolha o símbolo visual MAIS representativo desta lista pré-aprovada para a thumbnail
+(responda EXATAMENTE um item da lista, sem alterar o texto, sem aspas, sem explicação):
+
+{json.dumps(simbolos, ensure_ascii=False)}"""
+
+    try:
+        resposta = _gemini_generate(prompt)
+        escolhido = resposta.text.strip().strip('"').strip("'")
+        if escolhido in simbolos:
+            print(f"  🔣 Símbolo da thumbnail: {escolhido}")
+            return escolhido
+    except Exception as e:
+        print(f"  ⚠️ Erro ao escolher símbolo: {e}")
+
+    escolhido = random.choice(simbolos)
+    print(f"  🔣 Símbolo da thumbnail (aleatório da lista): {escolhido}")
+    return escolhido
+
+
+def _gerar_thumbnail_simbolo_lateral(texto_thumb, termo, output_path, largura, altura,
+                                     tema=None, titulo_video=None):
+    """
+    Thumbnail com símbolo específico: imagem do símbolo (Agnes AI, fallback Pexels) à esquerda,
+    degradê escuro à direita e texto grande (2-3 linhas, palavra-chave final em dourado, com
+    contorno) sobre o degradê. Sem faixa preta.
+    """
+    simbolo = escolher_simbolo_thumbnail(tema or '', titulo_video or texto_thumb) or termo
+
+    prompt_agnes = (f"{simbolo}, cinematic dramatic lighting, subject placed on the left side of "
+                    f"the frame, dark empty negative space on the right side, photorealistic, "
+                    f"high detail, no text, no watermark")
+
+    caminho_bruto = f"{ASSETS_DIR}/thumb_bruta.jpg"
+    if not _baixar_imagem_fundo(simbolo, caminho_bruto, prompt_agnes=prompt_agnes):
+        return None
+
+    img = Image.open(caminho_bruto).convert('RGB')
+    img = _cortar_para_ratio(img, largura, altura)
+    img = _escurecer_lado_direito(img)
+    _desenhar_texto_direita(img, texto_thumb, destaque_final=True, contorno=True,
+                            tamanho_inicial_frac=0.28, maximizar_fonte=True)
+
+    img.save(output_path, quality=92)
+    print("  ✅ Thumbnail gerada (símbolo + degradê + texto)")
+    return output_path
+
+
+def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720,
+                    tema=None, titulo_video=None):
     """
     Gera a thumbnail final. 'titulo' aqui já é o texto curto gerado por gerar_texto_thumbnail()
     (quem chama essa função já faz essa conversão antes). O método usado depende de
@@ -1637,6 +1295,7 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
     - "pexels_agnes" (padrão): imagem via Agnes AI/Pexels + faixa preta no topo
     - "pool_local": imagem pronta de config['pasta_thumbs'], com rotatividade, texto na metade
       direita (pensado pra imagens já com metade direita escurecida no próprio design)
+    - "simbolo_lateral": símbolo específico por tema (Agnes/Pexels) + degradê + texto à direita
     Se qualquer etapa falhar, retorna None — o vídeo publica normalmente, só sem thumbnail
     customizada (o YouTube usa uma automática).
     """
@@ -1645,6 +1304,9 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720):
     try:
         if metodo == 'pool_local':
             return _gerar_thumbnail_pool_local(titulo, output_path, largura, altura)
+        elif metodo == 'simbolo_lateral':
+            return _gerar_thumbnail_simbolo_lateral(titulo, termo, output_path, largura, altura,
+                                                    tema=tema, titulo_video=titulo_video)
         else:
             return _gerar_thumbnail_pexels_agnes(titulo, termo, output_path, largura, altura)
     except Exception as e:
@@ -1682,27 +1344,13 @@ def main():
     os.makedirs(ASSETS_DIR, exist_ok=True)
 
     tema = escolher_tema_reflexao()
-
-    print("✍️ Gerando roteiro (cadeia: tese → estrutura → escrita → crítica → título/descrição)...")
-    pacote_roteiro = gerar_pacote_roteiro(
-        tema=tema,
-        contexto_nicho=CONTEXTO_NICHO,
-        idioma_conteudo=IDIOMA_CONTEUDO,
-        instrucao_extra=INSTRUCAO_EXTRA_ROTEIRO,
-        documento_estilo=config.get('documento_estilo', []),
-        tipo_video=VIDEO_TYPE,
-        gemini_generate_fn=_gemini_generate,
-        modo_roteiro=config.get('modo_roteiro', 'cadeia_completa'),
-    )
-    roteiro = pacote_roteiro['roteiro_texto']
-    titulo_video = pacote_roteiro['titulo']
-    blocos_roteiro = pacote_roteiro['roteiro_blocos']  # reservado para Fase 2 (B-roll por bloco)
+    titulo_video = gerar_titulo(tema)
     print(f"🎯 Título: {titulo_video}")
-    if pacote_roteiro.get('tese'):
-        print(f"🧭 Tese: {pacote_roteiro['tese']}")
-    # revisar_roteiro() antigo não é mais necessário: o Estágio 4 da cadeia (crítica
-    # adversarial) já cobre correção de qualidade; ortografia grosseira é rara no Gemini
-    # e o roteiro já passa por _extrair_json, que falharia com texto muito malformado.
+
+    print("✍️ Gerando roteiro...")
+    roteiro = gerar_roteiro(tema, VIDEO_TYPE)
+    print("🔍 Revisando roteiro (ortografia/gramática)...")
+    roteiro = revisar_roteiro(roteiro)
 
     audio_path = f'{ASSETS_DIR}/audio.mp3'
     texto_falado = aplicar_correcoes_pronuncia(roteiro)
@@ -1713,57 +1361,11 @@ def main():
     audio_clip.close()
     print(f"⏱️ {duracao_narracao:.1f}s de narração")
 
-    # Fase 2: transcreve UMA VEZ aqui (cedo) e reaproveita em tudo que segue —
-    # mapeamento de bloco, legenda comum e destaque visual não retranscrevem.
-    print("🧠 Transcrevendo narração (relógio mestre para B-roll/legenda/destaque/SFX)...")
-    try:
-        palavras_tempo = transcrever_palavras_com_timestamps(audio_path)
-    except Exception as e:
-        print(f"⚠️ Falha na transcrição ({e}) — seguindo sem timestamps de palavra")
-        palavras_tempo = []
-
+    termo = escolher_termo_pesquisa(tema, roteiro)
     orientacao = 'portrait' if VIDEO_TYPE == 'short' else 'landscape'
+
     duracao_bloco_video = SEGUNDOS_LEAD_IN + duracao_narracao + SEGUNDOS_TAIL
-
-    if palavras_tempo:
-        blocos_com_tempo = mapear_tempos_para_blocos(blocos_roteiro, palavras_tempo)
-
-        termos_validados = config.get('termos_pesquisa_validados', [])
-        print("🔍 Escolhendo termo de busca por bloco (B-roll casado com o que está sendo dito)...")
-        termos_por_bloco = escolher_termos_por_bloco(tema, blocos_com_tempo, termos_validados, _gemini_generate)
-        for bloco, termo_bloco in zip(blocos_com_tempo, termos_por_bloco):
-            bloco['termo'] = termo_bloco
-
-        # Webdoc, opt-in via config.json ('usar_prints_noticia': true) — inerte pro canal
-        # atual, que não tem essa chave. Ver producao_visual.decidir_prints_de_noticia.
-        blocos_com_tempo = decidir_prints_de_noticia(
-            blocos_com_tempo, _gemini_generate,
-            usar_prints_noticia=config.get('usar_prints_noticia', False)
-        )
-
-        lista_clipes = baixar_clipes_por_bloco(blocos_com_tempo, orientacao)
-
-        print("✨ Escolhendo palavras de destaque...")
-        destaques_por_bloco = escolher_palavras_destaque(blocos_com_tempo, _gemini_generate)
-        destaques_resolvidos = resolver_destaques_com_tempo(
-            roteiro, palavras_tempo, blocos_com_tempo, destaques_por_bloco
-        )
-        eventos_sfx = construir_timeline_sfx(blocos_com_tempo, destaques_resolvidos)
-
-        largura_legenda = 1080 if VIDEO_TYPE == 'short' else 1920
-        altura_legenda = 1920 if VIDEO_TYPE == 'short' else 1080
-        offset_legenda = SEGUNDOS_LEAD_IN  # NÃO inclui intro — quem soma intro_duracao é criar_video_longo
-        clips_legenda = gerar_clips_legenda(roteiro, palavras_tempo, largura_legenda, altura_legenda,
-                                             offset=offset_legenda)
-        clips_destaque = gerar_clips_destaque(roteiro, palavras_tempo, destaques_resolvidos,
-                                               largura_legenda, altura_legenda, offset=offset_legenda)
-        termo = termos_por_bloco[0] if termos_por_bloco else ''  # usado só na busca de foto da thumbnail
-    else:
-        # sem timestamps não dá pra fazer nada da Fase 2 — cai pro comportamento antigo
-        # (1 termo pro vídeo inteiro, sem legenda/destaque/SFX sincronizados)
-        termo = escolher_termo_pesquisa(tema, roteiro)
-        lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_bloco_video)
-        clips_legenda, clips_destaque, eventos_sfx = [], [], []
+    lista_clipes = baixar_clipes_pexels(termo, orientacao, duracao_bloco_video)
 
     if not lista_clipes:
         print("❌ Nenhum clipe baixado — abortando este ciclo.")
@@ -1775,13 +1377,9 @@ def main():
     print("🎥 Montando vídeo...")
     try:
         if VIDEO_TYPE == 'short':
-            resultado = criar_video_curto(audio_path, roteiro, lista_clipes, video_path, duracao_narracao,
-                                           clips_legenda=clips_legenda, clips_destaque=clips_destaque,
-                                           eventos_sfx=eventos_sfx)
+            resultado = criar_video_curto(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
         else:
-            resultado = criar_video_longo(audio_path, roteiro, lista_clipes, video_path, duracao_narracao,
-                                           clips_legenda=clips_legenda, clips_destaque=clips_destaque,
-                                           eventos_sfx=eventos_sfx)
+            resultado = criar_video_longo(audio_path, roteiro, lista_clipes, video_path, duracao_narracao)
 
         if not resultado:
             print("❌ Erro ao criar vídeo")
@@ -1799,12 +1397,7 @@ def main():
 
     texto_inscricao = config.get('texto_inscricao', '🔔 Inscreva-se para reflexões diárias!')
     hashtag_conteudo = config.get('hashtag_conteudo', 'reflexao')
-    descricao_pacote = pacote_roteiro.get('descricao') or {}
-    corpo_descricao = (
-        f"{descricao_pacote.get('abertura_seo', '')}\n\n{descricao_pacote.get('corpo', '')}"
-        if descricao_pacote.get('corpo') else roteiro[:300] + '...'
-    )
-    descricao = corpo_descricao + f'\n\n{texto_inscricao}\n#' + \
+    descricao = roteiro[:300] + f'...\n\n{texto_inscricao}\n#' + \
                 ('shorts' if VIDEO_TYPE == 'short' else hashtag_conteudo)
     tags = config.get('tags_padrao', ['reflexao crista', 'motivacional', 'fe', 'inspiracao'])
     if VIDEO_TYPE == 'short':
@@ -1812,8 +1405,18 @@ def main():
 
     _salvar_tema_usado(tema)
 
+    # Thumbnail é gerada antes do teste/upload: assim, com PULAR_UPLOAD, dá pra conferir o resultado
+    # (ela é salva em videos/, junto do .mp4, e sai no artefato do workflow)
+    print("🖼️ Gerando thumbnail...")
+    texto_thumb = gerar_texto_thumbnail(titulo_video, tema)
+    print(f"   Texto da thumb: {texto_thumb}")
+    thumbnail_path = gerar_thumbnail(texto_thumb, termo, video_path.replace('.mp4', '_thumb.jpg'),
+                                     tema=tema, titulo_video=titulo_video)
+
     if PULAR_UPLOAD:
         print(f"\n⏭️ PULAR_UPLOAD ativo — vídeo NÃO será publicado. Disponível em: {video_path}")
+        if thumbnail_path:
+            print(f"   Thumbnail de teste: {thumbnail_path}")
         print("=" * 60)
         print("✅ TESTE CONCLUÍDO (sem publicação)")
         print("=" * 60)
@@ -1821,11 +1424,6 @@ def main():
 
     print("\n📤 Upload YouTube...")
     try:
-        print("🖼️ Gerando thumbnail...")
-        texto_thumb = gerar_texto_thumbnail(titulo_video, tema)
-        print(f"   Texto da thumb: {texto_thumb}")
-        thumbnail_path = gerar_thumbnail(texto_thumb, termo, f'{ASSETS_DIR}/thumbnail.jpg')
-
         video_id = fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path)
         url = f'https://youtube.com/{"shorts/" if VIDEO_TYPE == "short" else "watch?v="}{video_id}'
         print(f"✅ Publicado!\n🔗 {url}")
