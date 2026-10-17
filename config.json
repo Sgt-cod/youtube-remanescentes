@@ -74,9 +74,7 @@
     "sunrise city skyline"
   ],
   "correcoes_pronuncia": {
-    "fascinante": "fassinante",
-    "minuto": "minutu",
-    "minutos": "minutus"
+    "fascinante": "fassinante"
   },
   "idioma_conteudo": "português do Brasil",
   "idioma_whisper": "pt",
@@ -84,6 +82,12 @@
   "instrucao_extra_roteiro": "Pode referenciar ensinamentos ou princípios bíblicos relacionados ao tema, mas NUNCA cite passagens bíblicas literalmente/palavra por palavra — parafraseie a ideia ou mencione a referência (livro/capítulo) sem transcrever o texto integral, por respeito a direitos autorais de traduções específicas",
   "texto_inscricao": "🔔 Inscreva-se para reflexões diárias!",
   "hashtag_conteudo": "reflexao",
+  "hashtags_fixas": [
+    "#reflexao",
+    "#fe",
+    "#deus",
+    "#motivacao"
+  ],
   "idioma_gtts": "pt-br",
   "metodo_thumbnail": "pexels_agnes",
   "por_tipo": {
@@ -234,6 +238,13 @@
           "titulo": "Oração por direcionamento | Peça a Deus o próximo passo",
           "texto": "ORAÇÃO POR DIREÇÃO"
         }
+      ],
+      "hashtags_fixas": [
+        "#oracao",
+        "#oracaodanoite",
+        "#fe",
+        "#deus",
+        "#oracaopoderosa"
       ]
     }
   }
