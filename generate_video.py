@@ -1373,6 +1373,34 @@ def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=Non
     return video_id, thumb_ok
 
 
+def montar_hashtags(tipo_video, limite=40):
+    """
+    Monta a linha de hashtags da descrição.
+    - Se config['hashtags_fixas'] existir (lista, com ou sem '#'), usa exatamente essas, na ordem.
+      Senão, mantém o comportamento antigo: só '#<hashtag_conteudo>'.
+    - Shorts sempre começam com '#shorts'.
+    - Normaliza (sem espaços/símbolos, sem duplicadas ignorando maiúsculas) e limita a 'limite'
+      hashtags — acima disso o YouTube pode ignorar todas.
+    Como é config, funciona por tipo de vídeo via config['por_tipo'][long|short].
+    """
+    fixas = config.get('hashtags_fixas', [])
+    base = list(fixas) if fixas else [config.get('hashtag_conteudo', 'reflexao')]
+    brutas = (['shorts'] if tipo_video == 'short' else []) + base
+
+    final, vistos = [], set()
+    for h in brutas:
+        limpa = re.sub(r'[^\w]', '', str(h).lstrip('#'))  # remove espaços e símbolos; mantém acentos
+        if not limpa or limpa.lower() in vistos:
+            continue
+        vistos.add(limpa.lower())
+        final.append('#' + limpa)
+
+    if len(final) > limite:
+        print(f"⚠️ {len(final)} hashtags configuradas — usando só as {limite} primeiras")
+        final = final[:limite]
+    return ' '.join(final)
+
+
 def main():
     print(f"{'📱' if VIDEO_TYPE == 'short' else '🎬'} Iniciando ({VIDEO_TYPE})...")
     os.makedirs(VIDEOS_DIR, exist_ok=True)
@@ -1431,9 +1459,8 @@ def main():
         titulo += ' #shorts'
 
     texto_inscricao = config.get('texto_inscricao', '🔔 Inscreva-se para reflexões diárias!')
-    hashtag_conteudo = config.get('hashtag_conteudo', 'reflexao')
-    descricao = roteiro[:300] + f'...\n\n{texto_inscricao}\n#' + \
-                ('shorts' if VIDEO_TYPE == 'short' else hashtag_conteudo)
+    hashtags_desc = montar_hashtags(VIDEO_TYPE)
+    descricao = roteiro[:300] + f'...\n\n{texto_inscricao}\n\n{hashtags_desc}'
     tags = config.get('tags_padrao', ['reflexao crista', 'motivacional', 'fe', 'inspiracao'])
     if VIDEO_TYPE == 'short':
         tags.append('shorts')
