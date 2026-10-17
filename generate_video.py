@@ -1314,6 +1314,46 @@ def gerar_thumbnail(titulo, termo, output_path, largura=1280, altura=720,
         return None
 
 
+def _resumo_erro_http(e):
+    """Resume um erro da API do Google em 'status motivo' pra aparecer legível no log."""
+    status = getattr(getattr(e, 'resp', None), 'status', None)
+    motivo = getattr(e, 'reason', None) or str(e)
+    return f"{status} {str(motivo)[:200]}" if status else str(motivo)[:200]
+
+
+def definir_thumbnail(youtube, video_id, thumbnail_path, tentativas=3, esperas=(10, 45, 120)):
+    """
+    Aplica a thumbnail customizada ao vídeo recém-publicado, com retry.
+    Espera um pouco antes de cada tentativa (10s, 45s, 120s): logo após o upload o vídeo ainda
+    está sendo processado, e uma falha momentânea nesse intervalo é possível.
+    Retorna True se aplicou. Se falhar de vez, NÃO derruba o workflow: o vídeo já está publicado
+    e o arquivo da thumbnail continua em disco (sai no artefato) pra ser aplicado no Studio.
+    """
+    if not thumbnail_path or not os.path.exists(thumbnail_path):
+        print("ℹ️ Sem thumbnail customizada pra aplicar neste vídeo")
+        return False
+
+    mimetype = 'image/png' if thumbnail_path.lower().endswith('.png') else 'image/jpeg'
+    tamanho_kb = os.path.getsize(thumbnail_path) / 1024
+    print(f"🖼️ Aplicando thumbnail ({tamanho_kb:.0f} KB) ao vídeo {video_id}...")
+
+    for i in range(tentativas):
+        time.sleep(esperas[min(i, len(esperas) - 1)])
+        try:
+            youtube.thumbnails().set(
+                videoId=video_id,
+                media_body=MediaFileUpload(thumbnail_path, mimetype=mimetype)
+            ).execute()
+            print("✅ Thumbnail aplicada!")
+            return True
+        except Exception as e:
+            print(f"  ⚠️ Thumbnail, tentativa {i + 1}/{tentativas} falhou: {_resumo_erro_http(e)}")
+
+    print(f"❌ Thumbnail NÃO aplicada via API. Aplique manualmente no YouTube Studio "
+          f"(vídeo {video_id}) usando o arquivo: {thumbnail_path}")
+    return False
+
+
 def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=None):
     creds_dict = json.loads(YOUTUBE_CREDENTIALS)
     credentials = Credentials.from_authorized_user_info(creds_dict)
@@ -1329,13 +1369,8 @@ def fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path=Non
     response = request.execute()
     video_id = response['id']
 
-    if thumbnail_path and os.path.exists(thumbnail_path):
-        try:
-            youtube.thumbnails().set(videoId=video_id, media_body=MediaFileUpload(thumbnail_path)).execute()
-        except Exception as e:
-            print(f"❌ Erro thumbnail: {e}")
-
-    return video_id
+    thumb_ok = definir_thumbnail(youtube, video_id, thumbnail_path)
+    return video_id, thumb_ok
 
 
 def main():
@@ -1424,13 +1459,14 @@ def main():
 
     print("\n📤 Upload YouTube...")
     try:
-        video_id = fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path)
+        video_id, thumb_ok = fazer_upload_youtube(video_path, titulo, descricao, tags, thumbnail_path)
         url = f'https://youtube.com/{"shorts/" if VIDEO_TYPE == "short" else "watch?v="}{video_id}'
         print(f"✅ Publicado!\n🔗 {url}")
 
         log_entry = {
             'data': datetime.now().isoformat(), 'tipo': VIDEO_TYPE, 'tema': tema,
-            'titulo': titulo, 'duracao': duracao_narracao, 'video_id': video_id, 'url': url
+            'titulo': titulo, 'duracao': duracao_narracao, 'video_id': video_id, 'url': url,
+            'thumbnail_ok': thumb_ok
         }
         log_file = 'videos_gerados.json'
         logs = []
